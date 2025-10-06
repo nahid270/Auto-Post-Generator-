@@ -23,32 +23,27 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
-FORCE_SUB_CHANNEL = os.getenv("FORCE_SUB_CHANNEL") # Channel for Force Subscribe
+FORCE_SUB_CHANNEL = os.getenv("FORCE_SUB_CHANNEL")
 
-# ---- Database Setup (for user settings) ----
+# ---- Database Setup ----
 DB_FILE = "bot_settings.db"
 def db_query(query, params=(), fetch=None):
-    """A simple helper function to interact with the SQLite database."""
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute(query, params)
         conn.commit()
         if fetch == 'one': return cursor.fetchone()
 
-# Create table for user-specific settings if it doesn't exist
-db_query(
-    'CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, watermark_text TEXT, channel_id TEXT)'
-)
+db_query('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, watermark_text TEXT, channel_id TEXT)')
 
 # ---- Global Variables & Bot Initialization ----
 user_conversations = {}
 bot = Client("moviebot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# ---- Flask App for Keep-Alive ----
+# ---- Flask App ----
 app = Flask(__name__)
 @app.route('/')
-def home():
-    return "✅ Bot is Running Perfectly!"
+def home(): return "✅ Dual-Format Post Bot is Running!"
 Thread(target=lambda: app.run(host='0.0.0.0', port=8080), daemon=True).start()
 
 # ---- Font Configuration ----
@@ -58,80 +53,94 @@ try:
     FONT_SMALL = ImageFont.truetype("Poppins-Regular.ttf", 18)
     FONT_WATERMARK = ImageFont.truetype("Poppins-Bold.ttf", 22)
 except IOError:
-    print("⚠️ Warning: Font files not found. Using default fonts.")
+    print("⚠️ Warning: Font files not found.")
     FONT_BOLD = FONT_REGULAR = FONT_SMALL = FONT_WATERMARK = ImageFont.load_default()
 
-# ---- 2. HELPER FUNCTIONS AND DECORATORS ----
+# ---- 2. DECORATORS AND HELPER FUNCTIONS ----
 
 def force_subscribe(func):
-    """Decorator to check if a user is a member of the force subscribe channel."""
+    """Decorator to check for channel membership."""
     async def wrapper(client, message):
         if FORCE_SUB_CHANNEL:
             try:
-                # Check member status
                 await client.get_chat_member(chat_id=FORCE_SUB_CHANNEL, user_id=message.from_user.id)
             except UserNotParticipant:
-                # If user is not a member, send a message with a join link
-                channel_link = f"https://t.me/{FORCE_SUB_CHANNEL.replace('@', '')}"
+                link = f"https://t.me/{FORCE_SUB_CHANNEL.replace('@', '')}"
                 return await message.reply_text(
-                    "❗ **Join Our Channel to Use Me**\n\n"
-                    "To use this bot, you must be a member of our channel. It helps us grow!",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👉 Join Channel", url=channel_link)]])
+                    "❗ **Join Our Channel to Use Me**",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👉 Join Channel", url=link)]])
                 )
-        # If user is a member, proceed with the original function
         await func(client, message)
     return wrapper
 
-# ---- 3. TMDB API & CONTENT GENERATION FUNCTIONS ----
+# ---- 3. TMDB API & CONTENT GENERATION ----
 
 def search_tmdb(query: str):
-    """Searches TMDB for movies/TV shows."""
+    """Searches TMDB."""
     year, name = None, query.strip()
     match = re.search(r'(.+?)\s*\(?(\d{4})\)?$', query)
-    if match:
-        name, year = match.group(1).strip(), match.group(2)
-    
+    if match: name, year = match.group(1).strip(), match.group(2)
     url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={name}"
     if year: url += f"&year={year}"
-    
     try:
-        response = requests.get(url)
-        response.raise_for_status()
-        results = [r for r in response.json().get("results", []) if r.get("media_type") in ["movie", "tv"]]
-        return results[:5]
-    except requests.exceptions.RequestException as e:
-        print(f"TMDB Search Error: {e}")
-        return []
+        r = requests.get(url); r.raise_for_status()
+        return [res for res in r.json().get("results", []) if res.get("media_type") in ["movie", "tv"]][:5]
+    except: return []
 
 def get_tmdb_details(media_type: str, media_id: int):
-    """Fetches full details for a specific movie/TV show."""
+    """Fetches full details."""
     url = f"https://api.themoviedb.org/3/{media_type}/{media_id}?api_key={TMDB_API_KEY}&append_to_response=credits,videos"
     try:
-        response = requests.get(url)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"TMDB Details Error: {e}")
+        r = requests.get(url); r.raise_for_status(); return r.json()
+    except: return None
+
+# --- NEW: Function to add watermark to the original poster ---
+def watermark_poster(poster_url: str, watermark_text: str):
+    """Downloads a poster, adds a watermark, and returns it as a file object."""
+    if not poster_url or not watermark_text: return None
+    try:
+        img_data = requests.get(poster_url).content
+        img = Image.open(io.BytesIO(img_data)).convert("RGBA")
+        draw = ImageDraw.Draw(img)
+        
+        bbox = draw.textbbox((0, 0), watermark_text, font=FONT_WATERMARK)
+        text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        x = img.width - text_width - 15
+        y = img.height - text_height - 15
+        draw.text((x, y), watermark_text, font=FONT_WATERMARK, fill=(255, 255, 255, 150))
+        
+        buffer = io.BytesIO()
+        buffer.name = "watermarked_poster.png"
+        img.save(buffer, "PNG")
+        buffer.seek(0)
+        return buffer
+    except Exception as e:
+        print(f"Watermarking error: {e}")
         return None
 
-def generate_caption(data: dict):
-    """Generates a clean, formatted text caption."""
+# --- NEW: Function to generate the specific caption for Telegram channels ---
+def generate_channel_caption(data: dict, language: str, fixed_links: dict):
+    """Generates the caption for the Telegram channel post."""
     title = data.get("title") or data.get("name") or "N/A"
     year = (data.get("release_date") or data.get("first_air_date") or "----")[:4]
-    rating = f"⭐ {round(data.get('vote_average', 0), 1)}/10"
-    genres = ", ".join([g["name"] for g in data.get("genres", [])] or ["N/A"])
-    overview = data.get("overview", "N/A")
-    director = next((m["name"] for m in data.get("credits", {}).get("crew", []) if m.get("job") == "Director"), "N/A")
-    cast = ", ".join([a["name"] for a in data.get("credits", {}).get("cast", [])[:5]] or ["N/A"])
+    genres = ", ".join([g["name"] for g in data.get("genres", [])[:2]]) # Limit to 2 genres
     
-    return (
-        f"🎬 **{title} ({year})**\n\n"
-        f"**Rating:** {rating}\n**Genres:** {genres}\n**Director:** {director}\n**Cast:** {cast}\n\n"
-        f"**Plot:** _{overview[:500]}{'...' if len(overview) > 500 else ''}_"
+    caption = (
+        f"**{title} ({year})**\n\n"
+        f"🎭 **Genres:** {genres}\n"
+        f"🔊 **Language:** {language}\n\n"
+        "📥 **Download Links** 👇\n"
     )
+    
+    # Add fixed links if they exist
+    if fixed_links.get("480p"): caption += f"🔹 **480p:** [Link Here]({fixed_links['480p']})\n"
+    if fixed_links.get("720p"): caption += f"🔹 **720p:** [Link Here]({fixed_links['720p']})\n"
+    if fixed_links.get("1080p"): caption += f"🔹 **1080p:** [Link Here]({fixed_links['1080p']})\n"
+        
+    return caption
 
-def generate_html(data: dict, links: list):
-    """Generates a robust, Blogger-friendly HTML snippet."""
+def generate_html(data: dict, all_links: list):
+    """Generates the HTML for Blogger (this function is mostly unchanged)."""
     title = data.get("title") or data.get("name") or "N/A"
     year = (data.get("release_date") or data.get("first_air_date") or "----")[:4]
     rating = round(data.get('vote_average', 0), 1)
@@ -142,122 +151,40 @@ def generate_html(data: dict, links: list):
     trailer_key = next((v['key'] for v in data.get('videos', {}).get('results', []) if v['site'] == 'YouTube'), None)
     
     trailer_button = f'<a href="https://www.youtube.com/watch?v={trailer_key}" target="_blank" class="trailer-button">🎬 Watch Trailer</a>' if trailer_key else ""
-    download_buttons = "".join([f'<a href="{link["url"]}" target="_blank">🔽 {link["label"]}</a>' for link in links])
+    # Use all collected links for the HTML
+    download_buttons = "".join([f'<a href="{link["url"]}" target="_blank">🔽 {link["label"]}</a>' for link in all_links])
     
     return f"""
 <!-- Generated by Bot -->
-<style>
-.movie-card-container{{max-width:700px;margin:20px auto;background:#1c1c1c;border-radius:20px;padding:20px;color:#e0e0e0;font-family:sans-serif;overflow:hidden;}}
-.movie-header{{text-align:center;color:#00bcd4;margin-bottom:20px;}}
-.movie-content{{display:flex;flex-wrap:wrap;align-items:flex-start;}}
-.movie-poster-container{{flex:1 1 200px;margin-right:20px;}}
-.movie-poster-container img{{width:100%;height:auto;border-radius:15px;display:block;}}
-.movie-details{{flex:2 1 300px;}}
-.movie-details p{{margin:0 0 10px 0;}}
-.movie-details b{{color:#00e676;}}
-.backdrop-container{{width:100%;margin-top:20px;}}
-.backdrop-container img{{max-width:100%;height:auto;border-radius:15px;display:block;margin:auto;}}
-.action-buttons{{text-align:center;margin-top:20px;width:100%;}}
-.action-buttons a{{display:inline-block;background:linear-gradient(45deg,#ff512f,#dd2476);color:white!important;padding:12px 25px;margin:8px;border-radius:25px;text-decoration:none;font-weight:600;}}
-.action-buttons .trailer-button{{background:#c4302b;}}
-</style>
-<div class="movie-card-container">
-<h2 class="movie-header">{title} ({year})</h2>
-<div class="movie-content">
-<div class="movie-poster-container"><img src="{poster}" alt="{title} Poster"/></div>
-<div class="movie-details"><p><b>Genre:</b> {genres}</p><p><b>Rating:</b> ⭐ {rating}/10</p><p><b>Overview:</b> {overview}</p></div>
-</div>
-<div class="backdrop-container"><a href="{backdrop}" target="_blank"><img src="{backdrop}" alt="{title} Backdrop"/></a></div>
-<div class="action-buttons">{trailer_button}{download_buttons or ""}</div>
-</div>
+<style>.movie-card-container{{max-width:700px;margin:20px auto;background:#1c1c1c;border-radius:20px;padding:20px;color:#e0e0e0;font-family:sans-serif;overflow:hidden;}}.movie-header{{text-align:center;color:#00bcd4;margin-bottom:20px;}}.movie-content{{display:flex;flex-wrap:wrap;align-items:flex-start;}}.movie-poster-container{{flex:1 1 200px;margin-right:20px;}}.movie-poster-container img{{width:100%;height:auto;border-radius:15px;display:block;}}.movie-details{{flex:2 1 300px;}}.movie-details p{{margin:0 0 10px 0;}}.movie-details b{{color:#00e676;}}.backdrop-container{{width:100%;margin-top:20px;}}.backdrop-container img{{max-width:100%;height:auto;border-radius:15px;display:block;margin:auto;}}.action-buttons{{text-align:center;margin-top:20px;width:100%;}}.action-buttons a{{display:inline-block;background:linear-gradient(45deg,#ff512f,#dd2476);color:white!important;padding:12px 25px;margin:8px;border-radius:25px;text-decoration:none;font-weight:600;}}.action-buttons .trailer-button{{background:#c4302b;}}</style>
+<div class="movie-card-container"><h2 class="movie-header">{title} ({year})</h2><div class="movie-content"><div class="movie-poster-container"><img src="{poster}" alt="{title}"/></div><div class="movie-details"><p><b>Genre:</b> {genres}</p><p><b>Rating:</b> ⭐ {rating}/10</p><p><b>Overview:</b> {overview}</p></div></div><div class="backdrop-container"><a href="{backdrop}" target="_blank"><img src="{backdrop}" alt="{title}"/></a></div><div class="action-buttons">{trailer_button}{download_buttons or ""}</div></div>
 """
-
-def generate_image(data: dict, user_id: int):
-    """Generates a custom image with an optional watermark."""
-    try:
-        # Get user's watermark text from DB
-        watermark_data = db_query("SELECT watermark_text FROM users WHERE user_id = ?", (user_id,), fetch='one')
-        watermark_text = watermark_data[0] if watermark_data and watermark_data[0] else None
-
-        poster_url = f"https://image.tmdb.org/t/p/w500{data['poster_path']}" if data.get('poster_path') else None
-        if not poster_url: return None
-        
-        poster_img = Image.open(io.BytesIO(requests.get(poster_url).content)).convert("RGBA").resize((400, 600))
-
-        if data.get('backdrop_path'):
-            backdrop_url = f"https://image.tmdb.org/t/p/w1280{data['backdrop_path']}"
-            bg_img = Image.open(io.BytesIO(requests.get(backdrop_url).content)).convert("RGBA").resize((1280, 720))
-            bg_img = bg_img.filter(ImageFilter.GaussianBlur(3))
-            darken_layer = Image.new('RGBA', bg_img.size, (0, 0, 0, 128))
-            bg_img = Image.alpha_composite(bg_img, darken_layer)
-        else:
-            bg_img = Image.new('RGBA', (1280, 720), (10, 10, 20))
-        
-        bg_img.paste(poster_img, (50, 60), poster_img)
-        draw = ImageDraw.Draw(bg_img)
-        
-        # Draw text details
-        title = data.get("title") or data.get("name") or "N/A"
-        year = (data.get("release_date") or data.get("first_air_date") or "----")[:4]
-        draw.text((480, 80), f"{title} ({year})", font=FONT_BOLD, fill="white")
-        draw.text((480, 140), f"⭐ {round(data.get('vote_average', 0), 1)}/10", font=FONT_REGULAR, fill="#00e676")
-        draw.text((480, 180), " | ".join([g["name"] for g in data.get("genres", [])]), font=FONT_SMALL, fill="#00bcd4")
-        overview, y_text = data.get("overview", ""), 250
-        lines = [overview[i:i+80] for i in range(0, len(overview), 80)]
-        for line in lines[:7]:
-            draw.text((480, y_text), line, font=FONT_REGULAR, fill="#E0E0E0")
-            y_text += 30
-
-        # Add watermark if it exists
-        if watermark_text:
-            bbox = draw.textbbox((0, 0), watermark_text, font=FONT_WATERMARK)
-            text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            x = bg_img.width - text_width - 20
-            y = bg_img.height - text_height - 20
-            draw.text((x, y), watermark_text, font=FONT_WATERMARK, fill=(255, 255, 255, 150)) # Semi-transparent white
-            
-        img_buffer = io.BytesIO()
-        img_buffer.name = "poster.png"
-        bg_img.save(img_buffer, format="PNG")
-        img_buffer.seek(0)
-        return img_buffer
-    except Exception as e:
-        print(f"Image Generation Error: {e}")
-        return None
-
 
 # ---- 4. BOT HANDLERS ----
 
+# -- Command Handlers --
 @bot.on_message(filters.command("start") & filters.private)
 @force_subscribe
 async def start_cmd(client, message: Message):
-    # Ensure user is in the database
     db_query("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (message.from_user.id,))
     await message.reply_text(
-        "👋 **Welcome!** Send me a movie or series name to get started.\n\n"
-        "**Commands:**\n"
-        "`/setwatermark Your Text` - Add a watermark to generated images.\n"
-        "`/setchannel @ID` - Set the channel for direct posting.\n"
-        "`/cancel` - Cancel any ongoing operation."
+        "👋 **Welcome!** Send me a movie or series name.\n\n"
+        "I will generate two types of posts: one for your **Blogger** site and another for your **Telegram Channel**."
     )
 
 @bot.on_message(filters.command("setwatermark") & filters.private)
 @force_subscribe
 async def watermark_cmd(client, message: Message):
-    user_id = message.from_user.id
-    watermark_text = " ".join(message.command[1:]) if len(message.command) > 1 else None
-    db_query("UPDATE users SET watermark_text = ? WHERE user_id = ?", (watermark_text, user_id))
-    reply_text = f"✅ Watermark set to: `{watermark_text}`" if watermark_text else "✅ Watermark has been removed."
-    await message.reply_text(reply_text)
+    text = " ".join(message.command[1:]) if len(message.command) > 1 else None
+    db_query("UPDATE users SET watermark_text = ? WHERE user_id = ?", (text, message.from_user.id))
+    await message.reply_text(f"✅ Watermark {'set to: `' + text + '`' if text else 'removed.'}")
 
 @bot.on_message(filters.command("setchannel") & filters.private)
 @force_subscribe
 async def channel_cmd(client, message: Message):
-    user_id = message.from_user.id
-    channel_id = message.command[1] if len(message.command) > 1 else None
-    db_query("UPDATE users SET channel_id = ? WHERE user_id = ?", (channel_id, user_id))
-    reply_text = f"✅ Posting channel set to: `{channel_id}`" if channel_id else "✅ Posting channel has been removed."
-    await message.reply_text(reply_text)
+    cid = message.command[1] if len(message.command) > 1 else None
+    db_query("UPDATE users SET channel_id = ? WHERE user_id = ?", (cid, message.from_user.id))
+    await message.reply_text(f"✅ Channel {'set to: `' + cid + '`' if cid else 'removed.'}")
 
 @bot.on_message(filters.command("cancel") & filters.private)
 @force_subscribe
@@ -266,187 +193,195 @@ async def cancel_cmd(client, message: Message):
         del user_conversations[message.from_user.id]
         await message.reply_text("✅ Operation cancelled.")
 
-# Main handler for text messages (searches and link conversation)
+# -- Main Text and Conversation Handler --
 @bot.on_message(filters.text & filters.private & ~filters.command(["start", "setwatermark", "setchannel", "cancel"]))
 @force_subscribe
-async def text_handler(client, message: Message):
-    user_id = message.from_user.id
-    # If user is in a conversation, route to the link handler
-    if user_id in user_conversations and user_conversations[user_id].get("state") != "done":
-        return await link_conversation_handler(client, message)
-    
-    # Otherwise, perform a new search
+async def main_handler(client, message: Message):
+    uid = message.from_user.id
+    if uid in user_conversations and user_conversations[uid].get("state") != "done":
+        await conversation_flow_handler(client, message)
+    else:
+        await search_handler(client, message)
+
+async def search_handler(client, message: Message):
     processing_msg = await message.reply_text("🔍 Searching...")
     results = search_tmdb(message.text.strip())
-    if not results:
-        return await processing_msg.edit_text("❌ No content found. Please check the spelling.")
+    if not results: return await processing_msg.edit_text("❌ No content found.")
     
-    buttons = []
-    for r in results:
-        title = r.get('title') or r.get('name')
-        year = (r.get('release_date') or r.get('first_air_date') or '----').split('-')[0]
-        icon = '🎬' if r['media_type'] == 'movie' else '📺'
-        buttons.append([
-            InlineKeyboardButton(
-                f"{icon} {title} ({year})",
-                callback_data=f"select_{r['media_type']}_{r['id']}"
-            )
-        ])
-    await processing_msg.edit_text("**👇 Choose from the search results:**", reply_markup=InlineKeyboardMarkup(buttons))
+    buttons = [[InlineKeyboardButton(
+        f"{'🎬' if r['media_type'] == 'movie' else '📺'} {r.get('title') or r.get('name')} ({(r.get('release_date') or r.get('first_air_date') or '----').split('-')[0]})",
+        callback_data=f"select_{r['media_type']}_{r['id']}"
+    )] for r in results]
+    await processing_msg.edit_text("**👇 Choose from results:**", reply_markup=InlineKeyboardMarkup(buttons))
 
-# --- Conversation and Callback Handlers ---
-
-@bot.on_callback_query(filters.regex("^select_"))
-async def selection_cb(client, cb: Message):
-    await cb.answer("Fetching details...")
-    _, media_type, media_id_str = cb.data.split("_", 2)
-    
-    details = get_tmdb_details(media_type, int(media_id_str))
-    if not details:
-        return await cb.message.edit_text("❌ Failed to get details. Please try again.")
-
-    user_id = cb.from_user.id
-    user_conversations[user_id] = {"details": details, "links": []}
-    
-    buttons = [
-        [InlineKeyboardButton("✅ Yes, add links", callback_data=f"addlink_yes_{user_id}")],
-        [InlineKeyboardButton("❌ No, skip", callback_data=f"addlink_no_{user_id}")]
-    ]
-    await cb.message.edit_text(
-        "**🔗 Add Download Links?**\n\nDo you want to add custom download links to this post?",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-@bot.on_callback_query(filters.regex("^(addlink|skip)_"))
-async def addlink_cb(client, cb: Message):
-    action, user_id_str = cb.data.split("_", 1)
-    user_id = int(user_id_str)
-    
-    if cb.from_user.id != user_id: return await cb.answer("This is not for you!", show_alert=True)
-    
-    convo = user_conversations.get(user_id)
-    if not convo: return await cb.answer("Session expired.", show_alert=True)
-
-    if action == "addlink_yes":
-        convo["state"] = "wait_link_label"
-        await cb.message.edit_text(
-            "**Step 1: Button Text**\n\nPlease send the text for the download button (e.g., `Season 1 720p`)."
-        )
-    else: # This handles "skip" and "no, I'm done"
-        await cb.message.edit_text("✅ All set! Generating your content now...")
-        await generate_final_content(client, user_id, cb.message.chat.id, cb.message)
-
-async def link_conversation_handler(client, message: Message):
-    user_id = message.from_user.id
-    convo = user_conversations.get(user_id)
+async def conversation_flow_handler(client, message: Message):
+    """Manages the step-by-step conversation for collecting data."""
+    uid = message.from_user.id
+    convo = user_conversations.get(uid)
     if not convo: return
     
     state = convo.get("state")
     text = message.text.strip()
-
-    if state == "wait_link_label":
-        convo["current_label"] = text
-        convo["state"] = "wait_link_url"
-        await message.reply_text(f"**Step 2: URL**\n\nNow send the download URL for **'{text}'**.")
     
-    elif state == "wait_link_url":
-        if not text.startswith("http"):
-            return await message.reply_text("⚠️ Invalid URL. Please send a valid link.")
-        
-        convo["links"].append({"label": convo["current_label"], "url": text})
-        del convo["current_label"]
-        
+    # State machine for conversation
+    if state == "wait_language":
+        convo["language"] = text
+        convo["state"] = "wait_480p"
+        await message.reply_text("✅ Language set. Now, send the **480p** link or type `skip`.")
+    elif state == "wait_480p":
+        if text.lower() != 'skip': convo["fixed_links"]["480p"] = text
+        convo["state"] = "wait_720p"
+        await message.reply_text("✅ Got it. Now, send the **720p** link or type `skip`.")
+    elif state == "wait_720p":
+        if text.lower() != 'skip': convo["fixed_links"]["720p"] = text
+        convo["state"] = "wait_1080p"
+        await message.reply_text("✅ Okay. Now, send the **1080p** link or type `skip`.")
+    elif state == "wait_1080p":
+        if text.lower() != 'skip': convo["fixed_links"]["1080p"] = text
+        convo["state"] = "ask_custom_links"
         buttons = [
-            [InlineKeyboardButton("✅ Yes, add another", callback_data=f"addlink_yes_{user_id}")],
-            [InlineKeyboardButton("✅ No, I'm done", callback_data=f"skip_{user_id}")]
+            [InlineKeyboardButton("✅ Yes, add more", callback_data=f"addcustom_yes_{uid}")],
+            [InlineKeyboardButton("❌ No, I'm done", callback_data=f"addcustom_no_{uid}")],
         ]
         await message.reply_text(
-            f"✅ Link added!\n\nDo you want to add another link?",
+            "**Blogger Links (Optional)**\n\nDo you want to add more custom links (for series episodes, etc.) for the Blogger post?",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
+    elif state == "wait_custom_label":
+        convo["current_label"] = text
+        convo["state"] = "wait_custom_url"
+        await message.reply_text(f"OK, now send the URL for **'{text}'**.")
+    elif state == "wait_custom_url":
+        if not text.startswith("http"): return await message.reply_text("⚠️ Invalid URL.")
+        convo["custom_links"].append({"label": convo["current_label"], "url": text})
+        del convo["current_label"]
+        buttons = [
+            [InlineKeyboardButton("✅ Add another", callback_data=f"addcustom_yes_{uid}")],
+            [InlineKeyboardButton("✅ I'm done", callback_data=f"addcustom_no_{uid}")],
+        ]
+        await message.reply_text("Link added! Add another?", reply_markup=InlineKeyboardMarkup(buttons))
 
-async def generate_final_content(client, user_id, chat_id, msg):
-    convo = user_conversations.get(user_id)
+# --- Callback Handlers ---
+@bot.on_callback_query(filters.regex("^select_"))
+async def selection_cb(client, cb: Message):
+    await cb.answer("Fetching details...")
+    _, media_type, media_id_str = cb.data.split("_", 2)
+    details = get_tmdb_details(media_type, int(media_id_str))
+    if not details: return await cb.message.edit_text("❌ Failed to get details.")
+
+    uid = cb.from_user.id
+    user_conversations[uid] = {
+        "details": details,
+        "language": None,
+        "fixed_links": {},
+        "custom_links": [],
+        "state": "wait_language"
+    }
+    await cb.message.edit_text(
+        "**Step 1: Language**\n\nPlease enter the language for this post (e.g., `English`, `Hindi Dubbed`)."
+    )
+
+@bot.on_callback_query(filters.regex("^addcustom_"))
+async def custom_link_cb(client, cb: Message):
+    action, uid_str = cb.data.split("_", 1)
+    uid = int(uid_str)
+    if cb.from_user.id != uid: return await cb.answer("Not for you!", show_alert=True)
+    convo = user_conversations.get(uid)
+    if not convo: return await cb.answer("Session expired.", show_alert=True)
+    
+    if action == "addcustom_yes":
+        convo["state"] = "wait_custom_label"
+        await cb.message.edit_text("**Custom Link:**\n\nPlease send the button text (e.g., `Episode 01 480p`).")
+    else: # "no"
+        await cb.message.edit_text("✅ All info collected! Generating your posts now...")
+        await generate_final_content(client, uid, cb.message.chat.id, cb.message)
+
+# -- Final Content Generation & Action Callbacks --
+async def generate_final_content(client, uid, cid, msg):
+    convo = user_conversations.get(uid)
     if not convo: return
-    
-    details, links = convo["details"], convo["links"]
-    
-    await msg.edit_text("📝 Generating caption & HTML...")
-    caption = generate_caption(details)
-    html_code = generate_html(details, links)
-    
-    await msg.edit_text("🎨 Generating image with watermark (if set)...")
-    image_file = generate_image(details, user_id)
 
-    convo["generated"] = {"caption": caption, "html": html_code, "image": image_file}
+    details = convo["details"]
+    lang = convo["language"]
+    fixed_links = convo["fixed_links"]
+    custom_links = convo["custom_links"]
+    
+    # Prepare all links for Blogger
+    all_blogger_links = []
+    for q, url in fixed_links.items(): all_blogger_links.append({"label": f"Download {q}", "url": url})
+    all_blogger_links.extend(custom_links)
+
+    await msg.edit_text("📝 Generating content for Blogger & Channel...")
+    html_code = generate_html(details, all_blogger_links)
+    channel_caption = generate_channel_caption(details, lang, fixed_links)
+    
+    await msg.edit_text("🎨 Applying watermark to poster...")
+    watermark_data = db_query("SELECT watermark_text FROM users WHERE user_id=?", (uid,), 'one')
+    watermark = watermark_data[0] if watermark_data else None
+    poster_url = f"https://image.tmdb.org/t/p/w500{details['poster_path']}" if details.get('poster_path') else None
+    watermarked_poster = watermark_poster(poster_url, watermark)
+
+    convo["generated"] = {
+        "html": html_code,
+        "channel_caption": channel_caption,
+        "channel_poster": watermarked_poster
+    }
     convo["state"] = "done"
 
-    channel_data = db_query("SELECT channel_id FROM users WHERE user_id = ?", (user_id,), 'one')
-    channel_id = channel_data[0] if channel_data else None
+    channel_data = db_query("SELECT channel_id FROM users WHERE user_id=?", (uid,), 'one')
+    channel_id = channel_data[0] if channel_data and channel_data[0] else None
     
-    buttons = [
-        [InlineKeyboardButton("📝 Get HTML Code", callback_data=f"get_html_{user_id}")],
-        [InlineKeyboardButton("📄 Get Text Caption", callback_data=f"get_caption_{user_id}")],
-    ]
+    buttons = [[InlineKeyboardButton("📝 Get Blogger HTML", callback_data=f"get_html_{uid}")]]
     if channel_id:
-        buttons.append([InlineKeyboardButton("📢 Post to Channel", callback_data=f"post_channel_{user_id}")])
-    
-    if hasattr(msg, 'from_user') and msg.from_user.is_self: await msg.delete()
-    
-    if image_file:
-        await client.send_photo(chat_id, photo=image_file, caption=caption, reply_markup=InlineKeyboardMarkup(buttons))
-    else:
-        await client.send_message(chat_id, caption, reply_markup=InlineKeyboardMarkup(buttons))
+        buttons.append([InlineKeyboardButton("📢 Post to Channel", callback_data=f"post_channel_{uid}")])
+
+    await msg.delete()
+    await client.send_message(
+        cid,
+        f"✅ **Content Generated for `{details.get('title') or details.get('name')}`**\n\nChoose an option below:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 @bot.on_callback_query(filters.regex("^(get_|post_)"))
 async def final_action_cb(client, cb: Message):
-    try:
-        action, user_id_str = cb.data.rsplit("_", 1)
-        user_id = int(user_id_str)
-    except (ValueError, IndexError): return await cb.answer("Error: Invalid callback.", show_alert=True)
-    
-    if cb.from_user.id != user_id: return await cb.answer("This is not for you!", show_alert=True)
-    
-    convo = user_conversations.get(user_id)
+    try: action, uid_str = cb.data.rsplit("_", 1); uid = int(uid_str)
+    except: return await cb.answer("Error.", show_alert=True)
+    if cb.from_user.id != uid: return await cb.answer("Not for you!", show_alert=True)
+    convo = user_conversations.get(uid);
     if not convo or "generated" not in convo: return await cb.answer("Session expired.", show_alert=True)
     
-    generated_content = convo["generated"]
+    gen = convo["generated"]
     
     if action == "get_html":
         await cb.answer()
-        html_code = generated_content["html"]
-        if len(html_code) > 4000:
+        html = gen["html"]
+        if len(html) > 4000:
             title = (convo["details"].get("title") or convo["details"].get("name") or "post").replace(" ", "_")
-            await client.send_document(cb.message.chat.id, document=io.BytesIO(html_code.encode('utf-8')), file_name=f"{title}.html")
+            await client.send_document(cb.message.chat.id, document=io.BytesIO(html.encode('utf-8')), file_name=f"{title}.html")
         else:
-            await client.send_message(cb.message.chat.id, f"```html\n{html_code}\n```", parse_mode=enums.ParseMode.MARKDOWN)
+            await client.send_message(cb.message.chat.id, f"```html\n{html}\n```", parse_mode=enums.ParseMode.MARKDOWN)
 
-    elif action == "get_caption":
-        await cb.answer()
-        await client.send_message(cb.message.chat.id, generated_content["caption"])
-        
     elif action == "post_channel":
-        channel_data = db_query("SELECT channel_id FROM users WHERE user_id = ?", (user_id,), 'one')
-        channel_id = channel_data[0] if channel_data else None
-        if not channel_id: return await cb.answer("Channel not set. Use /setchannel first.", show_alert=True)
+        channel_data = db_query("SELECT channel_id FROM users WHERE user_id=?", (uid,), 'one')
+        channel_id = channel_data[0] if channel_data and channel_data[0] else None
+        if not channel_id: return await cb.answer("Channel not set.", show_alert=True)
         
         await cb.answer("Posting...", show_alert=False)
         try:
-            image_file = generated_content.get("image")
-            caption = generated_content["caption"]
-            if image_file:
-                image_file.seek(0)
-                await client.send_photo(channel_id, photo=image_file, caption=caption)
-            else:
+            poster, caption = gen["channel_poster"], gen["channel_caption"]
+            if poster:
+                poster.seek(0)
+                await client.send_photo(channel_id, photo=poster, caption=caption)
+            else: # Fallback if no poster
                 await client.send_message(channel_id, caption)
             
             await cb.edit_message_reply_markup(reply_markup=None)
-            await client.send_message(cb.message.chat.id, f"✅ Successfully posted to `{channel_id}`!")
+            await cb.message.reply_text(f"✅ Successfully posted to `{channel_id}`!")
         except Exception as e:
-            await client.send_message(cb.message.chat.id, f"❌ Failed to post. Error: {e}")
+            await cb.message.reply_text(f"❌ Failed to post. Error: {e}")
 
 # ---- 5. START THE BOT ----
 if __name__ == "__main__":
-    print("🚀 Bot is starting...")
+    print("🚀 Bot is starting... (Dual-Format Final Version)")
     bot.run()
     print("👋 Bot has stopped.")

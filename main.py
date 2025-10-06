@@ -23,6 +23,7 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 FORCE_SUB_CHANNEL = os.getenv("FORCE_SUB_CHANNEL")
+INVITE_LINK = os.getenv("INVITE_LINK") # For private channel join link
 
 # ---- Database Setup ----
 DB_FILE = "bot_settings.db"
@@ -42,7 +43,7 @@ bot = Client("moviebot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 # ---- Flask App & Font Config ----
 app = Flask(__name__)
 @app.route('/')
-def home(): return "✅ Dual-Command Bot is Running!"
+def home(): return "✅ 100% Final Bot is Running!"
 Thread(target=lambda: app.run(host='0.0.0.0', port=8080), daemon=True).start()
 
 try:
@@ -50,16 +51,24 @@ try:
     FONT_REGULAR = ImageFont.truetype("Poppins-Regular.ttf", 24)
     FONT_SMALL = ImageFont.truetype("Poppins-Regular.ttf", 18)
     FONT_WATERMARK = ImageFont.truetype("Poppins-Bold.ttf", 22)
-except IOError: FONT_BOLD = FONT_REGULAR = FONT_SMALL = FONT_WATERMARK = ImageFont.load_default()
+except IOError:
+    print("⚠️ Warning: Font files not found. Using default fonts.")
+    FONT_BOLD = FONT_REGULAR = FONT_SMALL = FONT_WATERMARK = ImageFont.load_default()
 
 # ---- 2. DECORATORS AND HELPER FUNCTIONS ----
 def force_subscribe(func):
+    """Decorator to check for channel membership, now with proper invite link handling."""
     async def wrapper(client, message):
         if FORCE_SUB_CHANNEL:
-            try: await client.get_chat_member(FORCE_SUB_CHANNEL, message.from_user.id)
+            try:
+                await client.get_chat_member(int(FORCE_SUB_CHANNEL), message.from_user.id)
             except UserNotParticipant:
-                link = f"https://t.me/{FORCE_SUB_CHANNEL.replace('@', '')}"
-                return await message.reply_text("❗ **Join Our Channel to Use Me**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👉 Join Channel", url=link)]]))
+                # Use INVITE_LINK for the button, ensuring it works for private channels
+                join_link = INVITE_LINK or f"https://t.me/{FORCE_SUB_CHANNEL.replace('@', '')}"
+                return await message.reply_text(
+                    "❗ **Join Our Channel to Use Me**",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👉 Join Channel", url=join_link)]])
+                )
         await func(client, message)
     return wrapper
 
@@ -69,12 +78,15 @@ def search_tmdb(query: str):
     match = re.search(r'(.+?)\s*\(?(\d{4})\)?$', query)
     if match: name, year = match.group(1).strip(), match.group(2)
     url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={name}" + (f"&year={year}" if year else "")
-    try: r = requests.get(url); r.raise_for_status(); return [res for res in r.json().get("results", []) if res.get("media_type") in ["movie", "tv"]][:5]
+    try:
+        r = requests.get(url); r.raise_for_status()
+        return [res for res in r.json().get("results", []) if res.get("media_type") in ["movie", "tv"]][:5]
     except: return []
 
 def get_tmdb_details(media_type: str, media_id: int):
     url = f"https://api.themoviedb.org/3/{media_type}/{media_id}?api_key={TMDB_API_KEY}&append_to_response=credits,videos"
-    try: r = requests.get(url); r.raise_for_status(); return r.json()
+    try:
+        r = requests.get(url); r.raise_for_status(); return r.json()
     except: return None
 
 def watermark_poster(poster_url: str, watermark_text: str):
@@ -135,12 +147,11 @@ async def search_commands(client, message: Message):
     query = " ".join(message.command[1:])
     processing_msg = await message.reply_text(f"🔍 Searching for `{query}`...")
     results = search_tmdb(query)
-    if not results:
-        return await processing_msg.edit_text("❌ No content found.")
+    if not results: return await processing_msg.edit_text("❌ No content found.")
     
     buttons = [[InlineKeyboardButton(
         f"{'🎬' if r['media_type'] == 'movie' else '📺'} {r.get('title') or r.get('name')} ({(r.get('release_date') or r.get('first_air_date') or '----').split('-')[0]})",
-        callback_data=f"select_{command}_{r['media_type']}_{r['id']}" # Added command to callback
+        callback_data=f"select_{command}_{r['media_type']}_{r['id']}"
     )] for r in results]
     await processing_msg.edit_text("**👇 Choose from results:**", reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -174,8 +185,7 @@ async def conversation_handler(client, message: Message):
 
     if flow == "blogger":
         if state == "wait_blogger_link_label":
-            convo["current_label"] = text
-            convo["state"] = "wait_blogger_link_url"
+            convo["current_label"] = text; convo["state"] = "wait_blogger_link_url"
             await message.reply_text(f"OK, now send the URL for **'{text}'**.")
         elif state == "wait_blogger_link_url":
             if not text.startswith("http"): return await message.reply_text("⚠️ Invalid URL.")
@@ -199,8 +209,8 @@ async def conversation_handler(client, message: Message):
             await message.reply_text("✅ Okay. Now, send the **1080p** link or `skip`.")
         elif state == "wait_1080p":
             if text.lower() != 'skip': convo["fixed_links"]["1080p"] = text
-            await message.reply_text("✅ All info collected! Generating channel post...")
-            await generate_channel_post(client, uid, message.chat.id, message)
+            processing_msg = await message.reply_text("✅ All info collected! Generating channel post...")
+            await generate_channel_post(client, uid, message.chat.id, processing_msg)
 
 @bot.on_callback_query(filters.regex("^(addbloggerlink|doneblogger)_"))
 async def blogger_link_cb(client, cb: Message):
@@ -213,8 +223,8 @@ async def blogger_link_cb(client, cb: Message):
         convo["state"] = "wait_blogger_link_label"
         await cb.message.edit_text("OK, send the button text for the next link.")
     else: # doneblogger
-        await cb.message.edit_text("✅ All links collected! Generating Blogger post...")
-        await generate_blogger_post(client, uid, cb.message.chat.id, cb.message)
+        processing_msg = await cb.message.edit_text("✅ All links collected! Generating Blogger post...")
+        await generate_blogger_post(client, uid, cb.message.chat.id, processing_msg)
 
 async def generate_blogger_post(client, uid, cid, msg):
     convo = user_conversations.get(uid);
@@ -240,6 +250,7 @@ async def generate_channel_post(client, uid, cid, msg):
     channel_data = db_query("SELECT channel_id FROM users WHERE user_id=?", (uid,), 'one')
     channel_id = channel_data[0] if channel_data and channel_data[0] else None
     
+    await msg.delete()
     # Show a preview to the user
     if watermarked_poster:
         await client.send_photo(cid, photo=watermarked_poster, caption=caption)
@@ -260,7 +271,7 @@ async def final_action_cb(client, cb: Message):
 
     if action == "get_html":
         html = convo.get("generated_html")
-        if not html: return await cb.answer("HTML not generated for this session.", show_alert=True)
+        if not html: return await cb.answer("HTML not generated.", show_alert=True)
         await cb.answer()
         if len(html) > 4000:
             title = (convo["details"].get("title") or "post").replace(" ", "_")
@@ -278,14 +289,13 @@ async def final_action_cb(client, cb: Message):
         await cb.answer("Posting...", show_alert=False)
         try:
             poster, caption = post_data["poster"], post_data["caption"]
-            if poster: poster.seek(0); await client.send_photo(channel_id, photo=poster, caption=caption)
-            else: await client.send_message(channel_id, caption)
+            if poster: poster.seek(0); await client.send_photo(int(channel_id), photo=poster, caption=caption)
+            else: await client.send_message(int(channel_id), caption)
             await cb.message.edit_text(f"✅ Successfully posted to `{channel_id}`!")
         except Exception as e:
             await cb.message.edit_text(f"❌ Failed to post. Error: {e}")
 
-# [Other essential commands like setwatermark, setchannel, cancel are included above]
-@bot.on_message(filters.command(["setwatermark", "setchannel", "cancel"]) & filters.private)
+@bot.on_message(filters.command(["setwatermark", "setchannel", "cancel"]))
 @force_subscribe
 async def other_commands(client, message: Message):
     command = message.command[0].lower()
@@ -305,6 +315,6 @@ async def other_commands(client, message: Message):
 
 # ---- 5. START THE BOT ----
 if __name__ == "__main__":
-    print("🚀 Bot is starting... (Dual Command Version)")
+    print("🚀 Bot is starting... (100% Final Version)")
     bot.run()
     print("👋 Bot has stopped.")

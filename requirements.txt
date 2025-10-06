@@ -3,3 +3,4 @@ Pillow
 requests
 Flask
 TgCrypto
+python-dotenv

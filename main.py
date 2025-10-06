@@ -9,7 +9,7 @@ import sqlite3
 from threading import Thread
 
 # --- Third-party Library Imports ---
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont
 from pyrogram import Client, filters, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from pyrogram.errors import UserNotParticipant, MessageNotModified
@@ -40,18 +40,11 @@ db_query('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, waterma
 user_conversations = {}
 bot = Client("moviebot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# ---- Flask App & Font Config ----
+# ---- Flask App ----
 app = Flask(__name__)
 @app.route('/')
 def home(): return "✅ 100% Reliable Bot is Running!"
 Thread(target=lambda: app.run(host='0.0.0.0', port=8080), daemon=True).start()
-
-try:
-    FONT_BOLD = ImageFont.truetype("Poppins-Bold.ttf", 32)
-    FONT_REGULAR = ImageFont.truetype("Poppins-Regular.ttf", 24)
-    FONT_SMALL = ImageFont.truetype("Poppins-Regular.ttf", 18)
-    FONT_WATERMARK = ImageFont.truetype("Poppins-Bold.ttf", 22)
-except IOError: FONT_BOLD = FONT_REGULAR = FONT_SMALL = FONT_WATERMARK = ImageFont.load_default()
 
 # ---- 2. DECORATORS AND HELPER FUNCTIONS ----
 def force_subscribe(func):
@@ -80,22 +73,32 @@ def get_tmdb_details(media_type: str, media_id: int):
     try: r = requests.get(url, timeout=10); r.raise_for_status(); return r.json()
     except: return None
 
+# MODIFIED FUNCTION
 def watermark_poster(poster_url: str, watermark_text: str):
-    if not poster_url: return None
+    if not poster_url:
+        return None, "Poster URL not found in TMDB data."
     try:
-        img_data = requests.get(poster_url, timeout=15).content
+        img_data = requests.get(poster_url, timeout=20).content
         img = Image.open(io.BytesIO(img_data)).convert("RGBA")
         if watermark_text:
             draw = ImageDraw.Draw(img)
-            bbox = draw.textbbox((0, 0), watermark_text, font=FONT_WATERMARK)
+            try:
+                font = ImageFont.truetype("Poppins-Bold.ttf", 22)
+            except IOError:
+                font = ImageFont.load_default()
+            bbox = draw.textbbox((0, 0), watermark_text, font=font)
             text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
             x, y = img.width - text_width - 15, img.height - text_height - 15
-            draw.text((x, y), watermark_text, font=FONT_WATERMARK, fill=(255, 255, 255, 150))
+            draw.text((x, y), watermark_text, font=font, fill=(255, 255, 255, 150))
         buffer = io.BytesIO(); buffer.name = "poster.png"; img.save(buffer, "PNG"); buffer.seek(0)
-        return buffer
+        return buffer, None
+    except requests.exceptions.RequestException as e:
+        print(f"Network Error downloading poster: {e}")
+        return None, f"Network Error: Failed to download poster from TMDB."
     except Exception as e:
-        print(f"Image Error: {e}")
-        return None
+        print(f"Image Processing Error: {e}")
+        return None, f"Image Error: Could not process the poster. Is 'Poppins-Bold.ttf' font file missing?"
+
 
 def generate_channel_caption(data: dict, language: str, links: dict):
     title = data.get("title") or data.get("name") or "N/A"
@@ -214,40 +217,32 @@ async def generate_blogger_post(client, uid, cid, msg):
     await client.send_message(cid, f"✅ **Blogger Post Generated!**", reply_markup=InlineKeyboardMarkup(
         [[InlineKeyboardButton("📝 Get HTML Code", callback_data=f"get_html_{uid}")]]), parse_mode=enums.ParseMode.MARKDOWN)
 
-# ---- RELIABLE SYNCHRONOUS WORKFLOW FOR CHANNEL POST ----
+# MODIFIED FUNCTION
 async def generate_channel_post(client, uid, cid, msg):
     convo = user_conversations.get(uid)
     if not convo: return
-    
     try: await msg.edit_text("📝 Generating caption...")
     except MessageNotModified: pass
-    
     caption = generate_channel_caption(convo["details"], convo["language"], convo["fixed_links"])
     convo["generated_channel_post"] = {"caption": caption}
-
-    try: await msg.edit_text("🎨 Downloading poster... (This may take a moment)")
+    try: await msg.edit_text("🎨 Downloading and preparing poster...")
     except MessageNotModified: pass
-
     watermark_data = db_query("SELECT watermark_text FROM users WHERE user_id=?", (uid,), 'one')
     watermark = watermark_data[0] if watermark_data else None
     poster_url = f"https://image.tmdb.org/t/p/w500{convo['details']['poster_path']}" if convo['details'].get('poster_path') else None
-    
-    watermarked_poster = watermark_poster(poster_url, watermark)
+    watermarked_poster, error_message = watermark_poster(poster_url, watermark)
     convo["generated_poster"] = watermarked_poster
     convo["state"] = "done"
-    
     await msg.delete()
-
     channel_data = db_query("SELECT channel_id FROM users WHERE user_id=?", (uid,), 'one')
     channel_id = channel_data[0] if channel_data and channel_data[0] else None
-    
+    if error_message:
+        await client.send_message(cid, f"⚠️ **Poster Generation Failed!**\n\n**Reason:** `{error_message}`\n\nHere is the text-only version:", parse_mode=enums.ParseMode.MARKDOWN)
     if watermarked_poster:
         watermarked_poster.seek(0)
         preview_message = await client.send_photo(cid, photo=watermarked_poster, caption=caption, parse_mode=enums.ParseMode.MARKDOWN)
     else:
-        preview_message = await client.send_message(cid, "⚠️ **Warning:** Could not generate poster. Sending text-only preview.", parse_mode=enums.ParseMode.MARKDOWN)
-        await client.send_message(cid, caption, parse_mode=enums.ParseMode.MARKDOWN)
-        
+        preview_message = await client.send_message(cid, caption, parse_mode=enums.ParseMode.MARKDOWN)
     if channel_id:
         await client.send_message(
             cid, "**👆 This is a preview.**\nPost to your channel?",
@@ -263,7 +258,6 @@ async def final_action_cb(client, cb: Message):
     if cb.from_user.id != uid: return await cb.answer("Not for you!", show_alert=True)
     convo = user_conversations.get(uid)
     if not convo or convo.get("state") != "done": return await cb.answer("Session expired.", show_alert=True)
-
     if action == "get_html":
         html = convo.get("generated_html")
         if not html: return await cb.answer("HTML not generated.", show_alert=True)
@@ -273,14 +267,12 @@ async def final_action_cb(client, cb: Message):
             await client.send_document(cb.message.chat.id, document=io.BytesIO(html.encode('utf-8')), file_name=f"{title}.html")
         else:
             await client.send_message(cb.message.chat.id, f"```html\n{html}\n```", parse_mode=enums.ParseMode.MARKDOWN)
-
     elif action == "post_channel":
         post_data = convo.get("generated_channel_post")
         if not post_data: return await cb.answer("Channel post not generated.", show_alert=True)
         channel_data = db_query("SELECT channel_id FROM users WHERE user_id=?", (uid,), 'one')
         channel_id = channel_data[0] if channel_data and channel_data[0] else None
         if not channel_id: return await cb.answer("Channel not set.", show_alert=True)
-        
         await cb.answer("Posting...", show_alert=False)
         try:
             poster, caption = convo.get("generated_poster"), post_data["caption"]
@@ -290,13 +282,9 @@ async def final_action_cb(client, cb: Message):
                 await client.send_photo(chat_id_int, photo=poster, caption=caption, parse_mode=enums.ParseMode.MARKDOWN)
             else:
                 await client.send_message(chat_id_int, caption, parse_mode=enums.ParseMode.MARKDOWN)
-            
-            # Delete the "Post to channel?" message
             await cb.message.delete()
-            # Also try to delete the photo preview message it was replying to
             if cb.message.reply_to_message:
                 await cb.message.reply_to_message.delete()
-
             await client.send_message(cb.from_user.id, f"✅ Successfully posted to `{channel_id}`!", parse_mode=enums.ParseMode.MARKDOWN)
         except Exception as e:
             await cb.message.edit_text(f"❌ Failed to post. Error: {e}")

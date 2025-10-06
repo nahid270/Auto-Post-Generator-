@@ -123,7 +123,7 @@ def generate_channel_caption(data: dict, language: str, links: dict):
     if links.get("1080p"): caption += f"🔹 **1080p:** [ডাউনলোড করুন]({links['1080p']})\n"
     return caption
 
-# Other helper functions like generate_html remain the same as your first code
+# Other helper functions like generate_html can be added here if needed for /blogger
 
 # ---- 4. BOT HANDLERS ----
 @bot.on_message(filters.command("start") & filters.private)
@@ -143,7 +143,6 @@ async def start_cmd(client, message: Message):
         parse_mode=enums.ParseMode.MARKDOWN
     )
 
-# --- Detailed Post Flow (/post - renamed from /channelpost) ---
 @bot.on_message(filters.command(["post", "blogger"]) & filters.private)
 @force_subscribe
 async def search_commands(client, message: Message):
@@ -163,7 +162,6 @@ async def search_commands(client, message: Message):
     )] for r in results]
     await processing_msg.edit_text("**👇 ফলাফল থেকে বেছে নিন:**", reply_markup=InlineKeyboardMarkup(buttons))
 
-# --- Quick Post Flow (/quickpost) ---
 @bot.on_message(filters.command("quickpost") & filters.private)
 @force_subscribe
 async def quick_post_search(client, message: Message):
@@ -202,7 +200,6 @@ async def quick_post_select(client, cb: Message):
     user_settings = db_query("SELECT channel_id, watermark_text FROM users WHERE user_id = ?", (cb.from_user.id,), 'one')
     channel_id, watermark_text = user_settings
 
-    # Generate a simple caption for quick post
     title = details.get("title") or details.get("name")
     year = (details.get("release_date") or details.get("first_air_date") or "----")[:4]
     rating = round(details.get("vote_average", 0), 1)
@@ -216,6 +213,7 @@ async def quick_post_select(client, cb: Message):
 
     try:
         if poster:
+            poster.seek(0)
             await client.send_photo(int(channel_id), photo=poster, caption=caption, parse_mode=enums.ParseMode.MARKDOWN)
         else:
             await client.send_message(int(channel_id), caption, parse_mode=enums.ParseMode.MARKDOWN)
@@ -224,12 +222,8 @@ async def quick_post_select(client, cb: Message):
     except Exception as e:
         await cb.message.edit(f"❌ চ্যানেলে পোস্ট করতে সমস্যা হয়েছে।\n**ত্রুটি:** `{e}`")
 
-
-# --- Handlers from your original detailed script (V1) ---
-# These handlers manage the conversational flow for /post and /blogger
 @bot.on_callback_query(filters.regex("^select_"))
 async def selection_cb(client, cb: Message):
-    # This is from your V1 code, unchanged
     await cb.answer("Fetching details...")
     try: _, flow, media_type, mid = cb.data.split("_", 3)
     except: return await cb.message.edit_text("Invalid callback.")
@@ -238,17 +232,13 @@ async def selection_cb(client, cb: Message):
     uid = cb.from_user.id
     user_conversations[uid] = {"flow": flow, "details": details, "links": [], "fixed_links": {}, "state": ""}
     if flow == "blogger":
-        # ... (Same as your V1 code)
-        pass # Placeholder for your blogger logic
+        await cb.message.edit("Blogger flow is not fully implemented in this version yet.") # Placeholder
     elif flow == "post":
         user_conversations[uid]["state"] = "wait_channel_lang"
         await cb.message.edit_text("**চ্যানেল পোস্ট:** পোস্টের জন্য ভাষা লিখুন।")
 
-# The rest of your V1 handlers (/setwatermark, /setchannel, conversation_handler, etc.)
-# would go here, mostly unchanged. Make sure to integrate them correctly.
-# For brevity, I'll add the settings commands and a simplified conversation handler.
-
-@bot.on_message(filters.text & filters.private & ~filters.command())
+# ---- CORRECTED LINE IS HERE ----
+@bot.on_message(filters.text & filters.private & ~filters.command(["start", "post", "blogger", "quickpost", "setwatermark", "setchannel", "cancel"]))
 @force_subscribe
 async def conversation_handler(client, message: Message):
     uid, convo = message.from_user.id, user_conversations.get(message.from_user.id)
@@ -270,7 +260,6 @@ async def conversation_handler(client, message: Message):
     elif state == "wait_1080p":
         if text.lower() != 'skip': convo["fixed_links"]["1080p"] = text
         msg = await message.reply_text("✅ তথ্য সংগ্রহ সম্পন্ন! চ্যানেল পোস্ট তৈরি করা হচ্ছে...", quote=True)
-        # Call the final post generation function
         await generate_final_post_preview(client, uid, message.chat.id, msg)
 
 async def generate_final_post_preview(client, uid, cid, msg):
@@ -291,6 +280,7 @@ async def generate_final_post_preview(client, uid, cid, msg):
         await client.send_message(cid, f"⚠️ **পোস্টার তৈরিতে সমস্যা:** `{error}`")
 
     if poster:
+        poster.seek(0)
         preview_msg = await client.send_photo(cid, photo=poster, caption=caption, parse_mode=enums.ParseMode.MARKDOWN)
     else:
         preview_msg = await client.send_message(cid, caption, parse_mode=enums.ParseMode.MARKDOWN)
@@ -302,9 +292,7 @@ async def generate_final_post_preview(client, uid, cid, msg):
             reply_to_message_id=preview_msg.id,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 হ্যাঁ, চ্যানেলে পোস্ট করুন", callback_data=f"finalpost_{uid}")]]),
         )
-    # Storing data needed for the final post
     user_conversations[uid]['final_post'] = {'caption': caption, 'poster': poster}
-
 
 @bot.on_callback_query(filters.regex("^finalpost_"))
 async def post_to_channel_cb(client, cb: Message):

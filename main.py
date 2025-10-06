@@ -23,7 +23,7 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 FORCE_SUB_CHANNEL = os.getenv("FORCE_SUB_CHANNEL")
-INVITE_LINK = os.getenv("INVITE_LINK") # For private channel join link
+INVITE_LINK = os.getenv("INVITE_LINK")
 
 # ---- Database Setup ----
 DB_FILE = "bot_settings.db"
@@ -51,25 +51,18 @@ try:
     FONT_REGULAR = ImageFont.truetype("Poppins-Regular.ttf", 24)
     FONT_SMALL = ImageFont.truetype("Poppins-Regular.ttf", 18)
     FONT_WATERMARK = ImageFont.truetype("Poppins-Bold.ttf", 22)
-except IOError:
-    print("⚠️ Warning: Font files not found. Using default fonts.")
-    FONT_BOLD = FONT_REGULAR = FONT_SMALL = FONT_WATERMARK = ImageFont.load_default()
+except IOError: FONT_BOLD = FONT_REGULAR = FONT_SMALL = FONT_WATERMARK = ImageFont.load_default()
 
 # ---- 2. DECORATORS AND HELPER FUNCTIONS ----
 def force_subscribe(func):
-    """Decorator to check for channel membership, now with proper invite link handling."""
     async def wrapper(client, message):
         if FORCE_SUB_CHANNEL:
             try:
-                # Use int() for channel ID, but not for username
                 chat_id = int(FORCE_SUB_CHANNEL) if FORCE_SUB_CHANNEL.startswith("-100") else FORCE_SUB_CHANNEL
                 await client.get_chat_member(chat_id, message.from_user.id)
             except UserNotParticipant:
                 join_link = INVITE_LINK or f"https://t.me/{FORCE_SUB_CHANNEL.replace('@', '')}"
-                return await message.reply_text(
-                    "❗ **Join Our Channel to Use Me**",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👉 Join Channel", url=join_link)]])
-                )
+                return await message.reply_text("❗ **Join Our Channel to Use Me**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👉 Join Channel", url=join_link)]]))
         await func(client, message)
     return wrapper
 
@@ -79,26 +72,24 @@ def search_tmdb(query: str):
     match = re.search(r'(.+?)\s*\(?(\d{4})\)?$', query)
     if match: name, year = match.group(1).strip(), match.group(2)
     url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={name}" + (f"&year={year}" if year else "")
-    try:
-        r = requests.get(url); r.raise_for_status()
-        return [res for res in r.json().get("results", []) if res.get("media_type") in ["movie", "tv"]][:5]
+    try: r = requests.get(url); r.raise_for_status(); return [res for res in r.json().get("results", []) if res.get("media_type") in ["movie", "tv"]][:5]
     except: return []
 
 def get_tmdb_details(media_type: str, media_id: int):
     url = f"https://api.themoviedb.org/3/{media_type}/{media_id}?api_key={TMDB_API_KEY}&append_to_response=credits,videos"
-    try:
-        r = requests.get(url); r.raise_for_status(); return r.json()
+    try: r = requests.get(url); r.raise_for_status(); return r.json()
     except: return None
 
 def watermark_poster(poster_url: str, watermark_text: str):
-    if not poster_url or not watermark_text: return None
+    if not poster_url: return None # Watermark is optional, but poster is not
     try:
         img = Image.open(io.BytesIO(requests.get(poster_url).content)).convert("RGBA")
-        draw = ImageDraw.Draw(img)
-        bbox = draw.textbbox((0, 0), watermark_text, font=FONT_WATERMARK)
-        text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        x, y = img.width - text_width - 15, img.height - text_height - 15
-        draw.text((x, y), watermark_text, font=FONT_WATERMARK, fill=(255, 255, 255, 150))
+        if watermark_text: # Only add watermark if text is provided
+            draw = ImageDraw.Draw(img)
+            bbox = draw.textbbox((0, 0), watermark_text, font=FONT_WATERMARK)
+            text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            x, y = img.width - text_width - 15, img.height - text_height - 15
+            draw.text((x, y), watermark_text, font=FONT_WATERMARK, fill=(255, 255, 255, 150))
         buffer = io.BytesIO(); buffer.name = "poster.png"; img.save(buffer, "PNG"); buffer.seek(0)
         return buffer
     except: return None
@@ -175,8 +166,6 @@ async def selection_cb(client, cb: Message):
         user_conversations[uid]["state"] = "wait_channel_lang"
         await cb.message.edit_text("**Channel Post: Language**\n\nPlease enter the language for this post (e.g., `English`).")
 
-# <<<<<<<<<<<<<<<< প্রধান পরিবর্তন এখানে >>>>>>>>>>>>>>>>
-# The text handler now correctly ignores all defined commands.
 @bot.on_message(filters.text & filters.private & ~filters.command(["start", "blogger", "channelpost", "setwatermark", "setchannel", "cancel"]))
 @force_subscribe
 async def conversation_handler(client, message: Message):
@@ -239,23 +228,30 @@ async def generate_blogger_post(client, uid, cid, msg):
         [[InlineKeyboardButton("📝 Get HTML Code", callback_data=f"get_html_{uid}")]]))
 
 async def generate_channel_post(client, uid, cid, msg):
-    convo = user_conversations.get(uid);
+    convo = user_conversations.get(uid)
     if not convo: return
+    
     watermark_data = db_query("SELECT watermark_text FROM users WHERE user_id=?", (uid,), 'one')
     watermark = watermark_data[0] if watermark_data else None
     poster_url = f"https://image.tmdb.org/t/p/w500{convo['details']['poster_path']}" if convo['details'].get('poster_path') else None
     
     caption = generate_channel_caption(convo["details"], convo["language"], convo["fixed_links"])
-    watermarked_poster = watermark_poster(poster_url, watermark)
     
-    convo["generated_channel_post"] = {"caption": caption, "poster": watermarked_poster}; convo["state"] = "done"
+    # Generate and store the poster in the conversation
+    convo["generated_poster"] = watermark_poster(poster_url, watermark)
+    watermarked_poster = convo["generated_poster"]
+    
+    convo["generated_channel_post"] = {"caption": caption}
+    convo["state"] = "done"
     
     channel_data = db_query("SELECT channel_id FROM users WHERE user_id=?", (uid,), 'one')
     channel_id = channel_data[0] if channel_data and channel_data[0] else None
     
     if hasattr(msg, 'delete'): await msg.delete()
+
     # Show a preview to the user
     if watermarked_poster:
+        watermarked_poster.seek(0)
         await client.send_photo(cid, photo=watermarked_poster, caption=caption)
     else:
         await client.send_message(cid, caption)
@@ -263,6 +259,7 @@ async def generate_channel_post(client, uid, cid, msg):
     if channel_id:
         await client.send_message(cid, "**👆 This is a preview.**\nDo you want to post this to your channel?",
                                   reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 Yes, Post to Channel", callback_data=f"post_channel_{uid}")]]))
+
 
 @bot.on_callback_query(filters.regex("^(get_html|post_channel)_"))
 async def final_action_cb(client, cb: Message):
@@ -285,20 +282,30 @@ async def final_action_cb(client, cb: Message):
     elif action == "post_channel":
         post_data = convo.get("generated_channel_post")
         if not post_data: return await cb.answer("Channel post not generated.", show_alert=True)
+        
         channel_data = db_query("SELECT channel_id FROM users WHERE user_id=?", (uid,), 'one')
         channel_id = channel_data[0] if channel_data and channel_data[0] else None
         if not channel_id: return await cb.answer("Channel not set.", show_alert=True)
         
         await cb.answer("Posting...", show_alert=False)
         try:
-            poster, caption = post_data["poster"], post_data["caption"]
-            # Ensure channel ID is integer for pyrogram
+            # Retrieve the saved poster from the conversation
+            poster = convo.get("generated_poster")
+            caption = post_data["caption"]
+
             try: chat_id_int = int(channel_id)
             except ValueError: chat_id_int = channel_id
 
-            if poster: poster.seek(0); await client.send_photo(chat_id_int, photo=poster, caption=caption)
-            else: await client.send_message(chat_id_int, caption)
-            await cb.message.edit_text(f"✅ Successfully posted to `{channel_id}`!")
+            if poster:
+                poster.seek(0)
+                await client.send_photo(chat_id_int, photo=poster, caption=caption)
+            else:
+                await client.send_message(chat_id_int, caption)
+            
+            # Delete the preview and buttons
+            await cb.message.delete()
+            # Send a confirmation
+            await client.send_message(cb.from_user.id, f"✅ Successfully posted to `{channel_id}`!")
         except Exception as e:
             await cb.message.edit_text(f"❌ Failed to post. Error: {e}")
 
@@ -322,6 +329,6 @@ async def other_commands(client, message: Message):
 
 # ---- 5. START THE BOT ----
 if __name__ == "__main__":
-    print("🚀 Bot is starting... (100% Final Version with Dual Commands)")
+    print("🚀 Bot is starting... (100% Final Version with Photo Fix)")
     bot.run()
     print("👋 Bot has stopped.")

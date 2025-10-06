@@ -62,7 +62,11 @@ def force_subscribe(func):
                 await client.get_chat_member(chat_id, message.from_user.id)
             except UserNotParticipant:
                 join_link = INVITE_LINK or f"https://t.me/{FORCE_SUB_CHANNEL.replace('@', '')}"
-                return await message.reply_text("❗ **Join Our Channel to Use Me**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👉 Join Channel", url=join_link)]]))
+                return await message.reply_text(
+                    "❗ **Join Our Channel to Use Me**",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👉 Join Channel", url=join_link)]]),
+                    parse_mode=enums.ParseMode.MARKDOWN
+                )
         await func(client, message)
     return wrapper
 
@@ -127,23 +131,32 @@ def generate_html(data: dict, all_links: list):
 @force_subscribe
 async def start_cmd(client, message: Message):
     db_query("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (message.from_user.id,))
-    await message.reply_text("👋 **Welcome!**\n\n🔹 `/blogger <name>`\n🔹 `/channelpost <name>`")
+    await message.reply_text(
+        text="👋 **Welcome! I create posts for Blogs and Channels.**\n\n"
+             "**Choose a command:**\n"
+             "🔹 `/blogger <name>` - To generate HTML for Blogger.\n"
+             "🔹 `/channelpost <name>` - To generate a post for Telegram.\n\n"
+             "Use `/setwatermark` and `/setchannel` to configure.",
+        parse_mode=enums.ParseMode.MARKDOWN
+    )
 
 @bot.on_message(filters.command(["blogger", "channelpost"]) & filters.private)
 @force_subscribe
 async def search_commands(client, message: Message):
     command = message.command[0].lower()
     if len(message.command) == 1:
-        return await message.reply_text(f"**Usage:** `/{command} Movie Name`")
+        return await message.reply_text(f"**Usage:** `/{command} Movie Name`", parse_mode=enums.ParseMode.MARKDOWN)
+    
     query = " ".join(message.command[1:])
-    processing_msg = await message.reply_text(f"🔍 Searching for `{query}`...")
+    processing_msg = await message.reply_text(f"🔍 Searching for `{query}`...", parse_mode=enums.ParseMode.MARKDOWN)
     results = search_tmdb(query)
     if not results: return await processing_msg.edit_text("❌ No content found.")
+    
     buttons = [[InlineKeyboardButton(
         f"{'🎬' if r['media_type'] == 'movie' else '📺'} {r.get('title') or r.get('name')} ({(r.get('release_date') or r.get('first_air_date') or '----').split('-')[0]})",
         callback_data=f"select_{command}_{r['media_type']}_{r['id']}"
     )] for r in results]
-    await processing_msg.edit_text("**👇 Choose from results:**", reply_markup=InlineKeyboardMarkup(buttons))
+    await processing_msg.edit_text("**👇 Choose from results:**", reply_markup=InlineKeyboardMarkup(buttons), parse_mode=enums.ParseMode.MARKDOWN)
 
 @bot.on_callback_query(filters.regex("^select_"))
 async def selection_cb(client, cb: Message):
@@ -171,7 +184,7 @@ async def conversation_handler(client, message: Message):
     if flow == "blogger":
         if state == "wait_blogger_link_label":
             convo["current_label"] = text; convo["state"] = "wait_blogger_link_url"
-            await message.reply_text(f"OK, send the URL for **'{text}'**.")
+            await message.reply_text(f"OK, now send the URL for **'{text}'**.", parse_mode=enums.ParseMode.MARKDOWN)
         elif state == "wait_blogger_link_url":
             if not text.startswith("http"): return await message.reply_text("⚠️ Invalid URL.")
             convo["links"].append({"label": convo["current_label"], "url": text}); del convo["current_label"]
@@ -192,7 +205,7 @@ async def conversation_handler(client, message: Message):
             await message.reply_text("✅ Okay. Now, send **1080p** link or `skip`.")
         elif state == "wait_1080p":
             if text.lower() != 'skip': convo["fixed_links"]["1080p"] = text
-            msg = await message.reply_text("✅ All info collected! Generating channel post...")
+            msg = await message.reply_text("✅ All info collected! Generating channel post...", quote=True)
             await generate_channel_post(client, uid, message.chat.id, msg)
 
 @bot.on_callback_query(filters.regex("^(addbloggerlink|doneblogger)_"))
@@ -215,18 +228,21 @@ async def generate_blogger_post(client, uid, cid, msg):
     convo["generated_html"] = html; convo["state"] = "done"
     if hasattr(msg, 'delete'): await msg.delete()
     await client.send_message(cid, f"✅ **Blogger Post Generated!**", reply_markup=InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📝 Get HTML Code", callback_data=f"get_html_{uid}")]]))
+        [[InlineKeyboardButton("📝 Get HTML Code", callback_data=f"get_html_{uid}")]]), parse_mode=enums.ParseMode.MARKDOWN)
 
 async def generate_channel_post(client, uid, cid, msg):
     convo = user_conversations.get(uid)
     if not convo: return
-    await msg.edit_text("🎨 Downloading poster and applying watermark...")
+    
+    await msg.edit_text("🎨 Downloading poster & applying watermark...")
+    
     watermark_data = db_query("SELECT watermark_text FROM users WHERE user_id=?", (uid,), 'one')
     watermark = watermark_data[0] if watermark_data else None
     poster_url = f"https://image.tmdb.org/t/p/w500{convo['details']['poster_path']}" if convo['details'].get('poster_path') else None
-    caption = generate_channel_caption(convo["details"], convo["language"], convo["fixed_links"])
     
+    caption = generate_channel_caption(convo["details"], convo["language"], convo["fixed_links"])
     watermarked_poster = watermark_poster(poster_url, watermark)
+    
     convo["generated_poster"] = watermarked_poster
     convo["generated_channel_post"] = {"caption": caption}
     convo["state"] = "done"
@@ -235,16 +251,18 @@ async def generate_channel_post(client, uid, cid, msg):
     channel_id = channel_data[0] if channel_data and channel_data[0] else None
     
     if hasattr(msg, 'delete'): await msg.delete()
+
     if watermarked_poster:
         watermarked_poster.seek(0)
-        await client.send_photo(cid, photo=watermarked_poster, caption=caption)
+        await client.send_photo(cid, photo=watermarked_poster, caption=caption, parse_mode=enums.ParseMode.MARKDOWN)
     else:
-        await client.send_message(cid, "⚠️ **Warning:** Could not generate poster. Sending text-only preview.")
-        await client.send_message(cid, caption)
+        await client.send_message(cid, "⚠️ **Warning:** Could not generate poster. Sending text-only preview.", parse_mode=enums.ParseMode.MARKDOWN)
+        await client.send_message(cid, caption, parse_mode=enums.ParseMode.MARKDOWN)
         
     if channel_id:
         await client.send_message(cid, "**👆 This is a preview.**\nPost to your channel?",
-                                  reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 Yes, Post to Channel", callback_data=f"post_channel_{uid}")]]))
+                                  reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 Yes, Post to Channel", callback_data=f"post_channel_{uid}")]]),
+                                  parse_mode=enums.ParseMode.MARKDOWN)
 
 @bot.on_callback_query(filters.regex("^(get_html|post_channel)_"))
 async def final_action_cb(client, cb: Message):
@@ -277,11 +295,11 @@ async def final_action_cb(client, cb: Message):
             chat_id_int = int(channel_id) if channel_id.startswith("-100") else channel_id
             if poster:
                 poster.seek(0)
-                await client.send_photo(chat_id_int, photo=poster, caption=caption)
+                await client.send_photo(chat_id_int, photo=poster, caption=caption, parse_mode=enums.ParseMode.MARKDOWN)
             else:
-                await client.send_message(chat_id_int, caption)
-            await cb.message.delete()
-            await client.send_message(cb.from_user.id, f"✅ Successfully posted to `{channel_id}`!")
+                await client.send_message(chat_id_int, caption, parse_mode=enums.ParseMode.MARKDOWN)
+            if cb.message.reply_markup: await cb.message.delete()
+            await client.send_message(cb.from_user.id, f"✅ Successfully posted to `{channel_id}`!", parse_mode=enums.ParseMode.MARKDOWN)
         except Exception as e:
             await cb.message.edit_text(f"❌ Failed to post. Error: {e}")
 
@@ -293,11 +311,11 @@ async def other_commands(client, message: Message):
     if command == "setwatermark":
         text = " ".join(message.command[1:]) if len(message.command) > 1 else None
         db_query("UPDATE users SET watermark_text = ? WHERE user_id = ?", (text, uid))
-        await message.reply_text(f"✅ Watermark {'set to: `' + text + '`' if text else 'removed.'}")
+        await message.reply_text(f"✅ Watermark {'set to: `' + text + '`' if text else 'removed.'}", parse_mode=enums.ParseMode.MARKDOWN)
     elif command == "setchannel":
         cid = message.command[1] if len(message.command) > 1 else None
         db_query("UPDATE users SET channel_id = ? WHERE user_id = ?", (cid, uid))
-        await message.reply_text(f"✅ Channel {'set to: `' + cid + '`' if cid else 'removed.'}")
+        await message.reply_text(f"✅ Channel {'set to: `' + cid + '`' if cid else 'removed.'}", parse_mode=enums.ParseMode.MARKDOWN)
     elif command == "cancel":
         if uid in user_conversations:
             del user_conversations[uid]
@@ -305,6 +323,6 @@ async def other_commands(client, message: Message):
 
 # ---- 5. START THE BOT ----
 if __name__ == "__main__":
-    print("🚀 Bot is starting... (100% Final, Bug-Fixed Version)")
+    print("🚀 Bot is starting... (100% Final, Bug-Fixed Version 2.0)")
     bot.run()
     print("👋 Bot has stopped.")

@@ -6,7 +6,6 @@ import io
 import re
 import requests
 import sqlite3
-import asyncio # For background tasks
 from threading import Thread
 
 # --- Third-party Library Imports ---
@@ -44,7 +43,7 @@ bot = Client("moviebot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 # ---- Flask App & Font Config ----
 app = Flask(__name__)
 @app.route('/')
-def home(): return "✅ Asynchronous Bot is Running!"
+def home(): return "✅ 100% Reliable Bot is Running!"
 Thread(target=lambda: app.run(host='0.0.0.0', port=8080), daemon=True).start()
 
 try:
@@ -215,62 +214,47 @@ async def generate_blogger_post(client, uid, cid, msg):
     await client.send_message(cid, f"✅ **Blogger Post Generated!**", reply_markup=InlineKeyboardMarkup(
         [[InlineKeyboardButton("📝 Get HTML Code", callback_data=f"get_html_{uid}")]]), parse_mode=enums.ParseMode.MARKDOWN)
 
-# ---- ASYNCHRONOUS WORKFLOW FOR CHANNEL POST ----
-async def process_image_in_background(client, uid, cid, preview_msg_id):
+# ---- RELIABLE SYNCHRONOUS WORKFLOW FOR CHANNEL POST ----
+async def generate_channel_post(client, uid, cid, msg):
     convo = user_conversations.get(uid)
     if not convo: return
+    
+    try: await msg.edit_text("📝 Generating caption...")
+    except MessageNotModified: pass
+    
+    caption = generate_channel_caption(convo["details"], convo["language"], convo["fixed_links"])
+    convo["generated_channel_post"] = {"caption": caption}
+
+    try: await msg.edit_text("🎨 Downloading poster... (This may take a moment)")
+    except MessageNotModified: pass
 
     watermark_data = db_query("SELECT watermark_text FROM users WHERE user_id=?", (uid,), 'one')
     watermark = watermark_data[0] if watermark_data else None
     poster_url = f"https://image.tmdb.org/t/p/w500{convo['details']['poster_path']}" if convo['details'].get('poster_path') else None
     
     watermarked_poster = watermark_poster(poster_url, watermark)
-    
     convo["generated_poster"] = watermarked_poster
     convo["state"] = "done"
+    
+    await msg.delete()
 
     channel_data = db_query("SELECT channel_id FROM users WHERE user_id=?", (uid,), 'one')
     channel_id = channel_data[0] if channel_data and channel_data[0] else None
-    buttons = [[InlineKeyboardButton("📢 Post to Channel", callback_data=f"post_channel_{uid}")]] if channel_id else []
-
-    try:
-        if watermarked_poster:
-            watermarked_poster.seek(0)
-            await client.edit_message_media(
-                chat_id=cid, message_id=preview_msg_id,
-                media=enums.InputMediaPhoto(media=watermarked_poster)
-            )
-            await client.edit_message_caption(
-                chat_id=cid, message_id=preview_msg_id,
-                caption=convo["generated_channel_post"]["caption"],
-                reply_markup=InlineKeyboardMarkup(buttons),
-                parse_mode=enums.ParseMode.MARKDOWN
-            )
-        else:
-            await client.edit_message_text(
-                chat_id=cid, message_id=preview_msg_id,
-                text=convo["generated_channel_post"]["caption"] + "\n\n⚠️ **Poster generation failed.**",
-                reply_markup=InlineKeyboardMarkup(buttons), parse_mode=enums.ParseMode.MARKDOWN
-            )
-    except MessageNotModified: pass
-    except Exception as e:
-        print(f"Error updating preview message: {e}")
-        await client.edit_message_text(cid, preview_msg_id, "❌ An error occurred while generating the poster.")
-
-async def generate_channel_post(client, uid, cid, msg):
-    convo = user_conversations.get(uid)
-    if not convo: return
     
-    caption = generate_channel_caption(convo["details"], convo["language"], convo["fixed_links"])
-    convo["generated_channel_post"] = {"caption": caption}
-    
-    if hasattr(msg, 'delete'): await msg.delete()
-    
-    preview_msg = await client.send_message(
-        cid, caption + "\n\n🖼️ _Preparing poster, please wait..._", parse_mode=enums.ParseMode.MARKDOWN
-    )
-    
-    bot.loop.create_task(process_image_in_background(client, uid, cid, preview_msg.id))
+    if watermarked_poster:
+        watermarked_poster.seek(0)
+        preview_message = await client.send_photo(cid, photo=watermarked_poster, caption=caption, parse_mode=enums.ParseMode.MARKDOWN)
+    else:
+        preview_message = await client.send_message(cid, "⚠️ **Warning:** Could not generate poster. Sending text-only preview.", parse_mode=enums.ParseMode.MARKDOWN)
+        await client.send_message(cid, caption, parse_mode=enums.ParseMode.MARKDOWN)
+        
+    if channel_id:
+        await client.send_message(
+            cid, "**👆 This is a preview.**\nPost to your channel?",
+            reply_to_message_id=preview_message.id,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 Yes, Post to Channel", callback_data=f"post_channel_{uid}")]]),
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
 
 @bot.on_callback_query(filters.regex("^(get_html|post_channel)_"))
 async def final_action_cb(client, cb: Message):
@@ -278,11 +262,7 @@ async def final_action_cb(client, cb: Message):
     except: return await cb.answer("Error.", show_alert=True)
     if cb.from_user.id != uid: return await cb.answer("Not for you!", show_alert=True)
     convo = user_conversations.get(uid)
-    
-    if action == "post_channel" and convo.get("state") != "done":
-        return await cb.answer("⏳ Please wait, the poster is still being prepared...", show_alert=True)
-        
-    if not convo: return await cb.answer("Session expired.", show_alert=True)
+    if not convo or convo.get("state") != "done": return await cb.answer("Session expired.", show_alert=True)
 
     if action == "get_html":
         html = convo.get("generated_html")
@@ -310,7 +290,13 @@ async def final_action_cb(client, cb: Message):
                 await client.send_photo(chat_id_int, photo=poster, caption=caption, parse_mode=enums.ParseMode.MARKDOWN)
             else:
                 await client.send_message(chat_id_int, caption, parse_mode=enums.ParseMode.MARKDOWN)
+            
+            # Delete the "Post to channel?" message
             await cb.message.delete()
+            # Also try to delete the photo preview message it was replying to
+            if cb.message.reply_to_message:
+                await cb.message.reply_to_message.delete()
+
             await client.send_message(cb.from_user.id, f"✅ Successfully posted to `{channel_id}`!", parse_mode=enums.ParseMode.MARKDOWN)
         except Exception as e:
             await cb.message.edit_text(f"❌ Failed to post. Error: {e}")
@@ -332,6 +318,6 @@ async def other_commands(client, message: Message):
 
 # ---- 5. START THE BOT ----
 if __name__ == "__main__":
-    print("🚀 Bot is starting... (Asynchronous Final, Bug-Fixed Version)")
+    print("🚀 Bot is starting... (100% Final, Reliable Version)")
     bot.run()
     print("👋 Bot has stopped.")

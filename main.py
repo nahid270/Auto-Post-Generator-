@@ -61,9 +61,10 @@ def force_subscribe(func):
     async def wrapper(client, message):
         if FORCE_SUB_CHANNEL:
             try:
-                await client.get_chat_member(int(FORCE_SUB_CHANNEL), message.from_user.id)
+                # Use int() for channel ID, but not for username
+                chat_id = int(FORCE_SUB_CHANNEL) if FORCE_SUB_CHANNEL.startswith("-100") else FORCE_SUB_CHANNEL
+                await client.get_chat_member(chat_id, message.from_user.id)
             except UserNotParticipant:
-                # Use INVITE_LINK for the button, ensuring it works for private channels
                 join_link = INVITE_LINK or f"https://t.me/{FORCE_SUB_CHANNEL.replace('@', '')}"
                 return await message.reply_text(
                     "❗ **Join Our Channel to Use Me**",
@@ -174,7 +175,9 @@ async def selection_cb(client, cb: Message):
         user_conversations[uid]["state"] = "wait_channel_lang"
         await cb.message.edit_text("**Channel Post: Language**\n\nPlease enter the language for this post (e.g., `English`).")
 
-@bot.on_message(filters.text & filters.private & ~filters.command(list(bot.get_commands().keys())))
+# <<<<<<<<<<<<<<<< প্রধান পরিবর্তন এখানে >>>>>>>>>>>>>>>>
+# The text handler now correctly ignores all defined commands.
+@bot.on_message(filters.text & filters.private & ~filters.command(["start", "blogger", "channelpost", "setwatermark", "setchannel", "cancel"]))
 @force_subscribe
 async def conversation_handler(client, message: Message):
     uid = message.from_user.id
@@ -231,7 +234,7 @@ async def generate_blogger_post(client, uid, cid, msg):
     if not convo: return
     html_code = generate_html(convo["details"], convo["links"])
     convo["generated_html"] = html_code; convo["state"] = "done"
-    await msg.delete()
+    if hasattr(msg, 'delete'): await msg.delete()
     await client.send_message(cid, f"✅ **Blogger Post Generated!**", reply_markup=InlineKeyboardMarkup(
         [[InlineKeyboardButton("📝 Get HTML Code", callback_data=f"get_html_{uid}")]]))
 
@@ -250,7 +253,7 @@ async def generate_channel_post(client, uid, cid, msg):
     channel_data = db_query("SELECT channel_id FROM users WHERE user_id=?", (uid,), 'one')
     channel_id = channel_data[0] if channel_data and channel_data[0] else None
     
-    await msg.delete()
+    if hasattr(msg, 'delete'): await msg.delete()
     # Show a preview to the user
     if watermarked_poster:
         await client.send_photo(cid, photo=watermarked_poster, caption=caption)
@@ -289,8 +292,12 @@ async def final_action_cb(client, cb: Message):
         await cb.answer("Posting...", show_alert=False)
         try:
             poster, caption = post_data["poster"], post_data["caption"]
-            if poster: poster.seek(0); await client.send_photo(int(channel_id), photo=poster, caption=caption)
-            else: await client.send_message(int(channel_id), caption)
+            # Ensure channel ID is integer for pyrogram
+            try: chat_id_int = int(channel_id)
+            except ValueError: chat_id_int = channel_id
+
+            if poster: poster.seek(0); await client.send_photo(chat_id_int, photo=poster, caption=caption)
+            else: await client.send_message(chat_id_int, caption)
             await cb.message.edit_text(f"✅ Successfully posted to `{channel_id}`!")
         except Exception as e:
             await cb.message.edit_text(f"❌ Failed to post. Error: {e}")
@@ -315,6 +322,6 @@ async def other_commands(client, message: Message):
 
 # ---- 5. START THE BOT ----
 if __name__ == "__main__":
-    print("🚀 Bot is starting... (100% Final Version)")
+    print("🚀 Bot is starting... (100% Final Version with Dual Commands)")
     bot.run()
     print("👋 Bot has stopped.")

@@ -72,19 +72,23 @@ def search_tmdb(query: str):
     match = re.search(r'(.+?)\s*\(?(\d{4})\)?$', query)
     if match: name, year = match.group(1).strip(), match.group(2)
     url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={name}" + (f"&year={year}" if year else "")
-    try: r = requests.get(url); r.raise_for_status(); return [res for res in r.json().get("results", []) if res.get("media_type") in ["movie", "tv"]][:5]
+    try:
+        r = requests.get(url, timeout=10); r.raise_for_status()
+        return [res for res in r.json().get("results", []) if res.get("media_type") in ["movie", "tv"]][:5]
     except: return []
 
 def get_tmdb_details(media_type: str, media_id: int):
     url = f"https://api.themoviedb.org/3/{media_type}/{media_id}?api_key={TMDB_API_KEY}&append_to_response=credits,videos"
-    try: r = requests.get(url); r.raise_for_status(); return r.json()
+    try:
+        r = requests.get(url, timeout=10); r.raise_for_status(); return r.json()
     except: return None
 
 def watermark_poster(poster_url: str, watermark_text: str):
-    if not poster_url: return None # Watermark is optional, but poster is not
+    if not poster_url: return None
     try:
-        img = Image.open(io.BytesIO(requests.get(poster_url).content)).convert("RGBA")
-        if watermark_text: # Only add watermark if text is provided
+        img_data = requests.get(poster_url, timeout=10).content
+        img = Image.open(io.BytesIO(img_data)).convert("RGBA")
+        if watermark_text:
             draw = ImageDraw.Draw(img)
             bbox = draw.textbbox((0, 0), watermark_text, font=FONT_WATERMARK)
             text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -92,7 +96,9 @@ def watermark_poster(poster_url: str, watermark_text: str):
             draw.text((x, y), watermark_text, font=FONT_WATERMARK, fill=(255, 255, 255, 150))
         buffer = io.BytesIO(); buffer.name = "poster.png"; img.save(buffer, "PNG"); buffer.seek(0)
         return buffer
-    except: return None
+    except Exception as e:
+        print(f"Image Error: {e}")
+        return None
 
 def generate_channel_caption(data: dict, language: str, links: dict):
     title = data.get("title") or data.get("name") or "N/A"
@@ -121,26 +127,18 @@ def generate_html(data: dict, all_links: list):
 @force_subscribe
 async def start_cmd(client, message: Message):
     db_query("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (message.from_user.id,))
-    await message.reply_text(
-        "👋 **Welcome! I create posts for Blogs and Channels.**\n\n"
-        "**Choose a command:**\n"
-        "🔹 `/blogger <name>` - To generate HTML for Blogger.\n"
-        "🔹 `/channelpost <name>` - To generate a post for Telegram.\n\n"
-        "Use `/setwatermark` and `/setchannel` to configure."
-    )
+    await message.reply_text("👋 **Welcome!**\n\n🔹 `/blogger <name>`\n🔹 `/channelpost <name>`")
 
 @bot.on_message(filters.command(["blogger", "channelpost"]) & filters.private)
 @force_subscribe
 async def search_commands(client, message: Message):
     command = message.command[0].lower()
     if len(message.command) == 1:
-        return await message.reply_text(f"Please provide a movie/series name.\n**Example:** `/{command} Interstellar`")
-    
+        return await message.reply_text(f"**Usage:** `/{command} Movie Name`")
     query = " ".join(message.command[1:])
     processing_msg = await message.reply_text(f"🔍 Searching for `{query}`...")
     results = search_tmdb(query)
     if not results: return await processing_msg.edit_text("❌ No content found.")
-    
     buttons = [[InlineKeyboardButton(
         f"{'🎬' if r['media_type'] == 'movie' else '📺'} {r.get('title') or r.get('name')} ({(r.get('release_date') or r.get('first_air_date') or '----').split('-')[0]})",
         callback_data=f"select_{command}_{r['media_type']}_{r['id']}"
@@ -150,79 +148,71 @@ async def search_commands(client, message: Message):
 @bot.on_callback_query(filters.regex("^select_"))
 async def selection_cb(client, cb: Message):
     await cb.answer("Fetching details...")
-    try: _, flow_type, media_type, media_id_str = cb.data.split("_", 3)
-    except: return await cb.message.edit_text("Invalid callback data.")
-    
-    details = get_tmdb_details(media_type, int(media_id_str))
+    try: _, flow, media_type, mid = cb.data.split("_", 3)
+    except: return await cb.message.edit_text("Invalid callback.")
+    details = get_tmdb_details(media_type, int(mid))
     if not details: return await cb.message.edit_text("❌ Failed to get details.")
-
     uid = cb.from_user.id
-    user_conversations[uid] = {"flow": flow_type, "details": details, "links": [], "fixed_links": {}, "state": ""}
-    
-    if flow_type == "blogger":
+    user_conversations[uid] = {"flow": flow, "details": details, "links": [], "fixed_links": {}, "state": ""}
+    if flow == "blogger":
         user_conversations[uid]["state"] = "wait_blogger_link_label"
-        await cb.message.edit_text("**Blogger Post: Add Links**\n\nPlease send the button text for the first link (e.g., `Season 1 720p`).")
-    elif flow_type == "channelpost":
+        await cb.message.edit_text("**Blogger Post: Add Links**\nSend the button text for the first link.")
+    elif flow == "channelpost":
         user_conversations[uid]["state"] = "wait_channel_lang"
-        await cb.message.edit_text("**Channel Post: Language**\n\nPlease enter the language for this post (e.g., `English`).")
+        await cb.message.edit_text("**Channel Post: Language**\nEnter the language for this post.")
 
 @bot.on_message(filters.text & filters.private & ~filters.command(["start", "blogger", "channelpost", "setwatermark", "setchannel", "cancel"]))
 @force_subscribe
 async def conversation_handler(client, message: Message):
-    uid = message.from_user.id
-    convo = user_conversations.get(uid)
+    uid, convo = message.from_user.id, user_conversations.get(message.from_user.id)
     if not convo: return
-    
     state, text, flow = convo.get("state"), message.text.strip(), convo.get("flow")
 
     if flow == "blogger":
         if state == "wait_blogger_link_label":
             convo["current_label"] = text; convo["state"] = "wait_blogger_link_url"
-            await message.reply_text(f"OK, now send the URL for **'{text}'**.")
+            await message.reply_text(f"OK, send the URL for **'{text}'**.")
         elif state == "wait_blogger_link_url":
             if not text.startswith("http"): return await message.reply_text("⚠️ Invalid URL.")
-            convo["links"].append({"label": convo["current_label"], "url": text})
-            del convo["current_label"]
+            convo["links"].append({"label": convo["current_label"], "url": text}); del convo["current_label"]
             buttons = [[InlineKeyboardButton("✅ Add another", callback_data=f"addbloggerlink_{uid}")],
                        [InlineKeyboardButton("✅ Done", callback_data=f"doneblogger_{uid}")]]
             await message.reply_text("Link added! Add another?", reply_markup=InlineKeyboardMarkup(buttons))
-
     elif flow == "channelpost":
         if state == "wait_channel_lang":
             convo["language"] = text; convo["state"] = "wait_480p"
-            await message.reply_text("✅ Language set. Now, send the **480p** link or `skip`.")
+            await message.reply_text("✅ Language set. Now, send **480p** link or `skip`.")
         elif state == "wait_480p":
             if text.lower() != 'skip': convo["fixed_links"]["480p"] = text
             convo["state"] = "wait_720p"
-            await message.reply_text("✅ Got it. Now, send the **720p** link or `skip`.")
+            await message.reply_text("✅ Got it. Now, send **720p** link or `skip`.")
         elif state == "wait_720p":
             if text.lower() != 'skip': convo["fixed_links"]["720p"] = text
             convo["state"] = "wait_1080p"
-            await message.reply_text("✅ Okay. Now, send the **1080p** link or `skip`.")
+            await message.reply_text("✅ Okay. Now, send **1080p** link or `skip`.")
         elif state == "wait_1080p":
             if text.lower() != 'skip': convo["fixed_links"]["1080p"] = text
-            processing_msg = await message.reply_text("✅ All info collected! Generating channel post...")
-            await generate_channel_post(client, uid, message.chat.id, processing_msg)
+            msg = await message.reply_text("✅ All info collected! Generating channel post...")
+            await generate_channel_post(client, uid, message.chat.id, msg)
 
 @bot.on_callback_query(filters.regex("^(addbloggerlink|doneblogger)_"))
 async def blogger_link_cb(client, cb: Message):
     action, uid_str = cb.data.split("_", 1); uid = int(uid_str)
     if cb.from_user.id != uid: return await cb.answer("Not for you!", show_alert=True)
-    convo = user_conversations.get(uid);
+    convo = user_conversations.get(uid)
     if not convo: return await cb.answer("Session expired.", show_alert=True)
-    
     if action == "addbloggerlink":
         convo["state"] = "wait_blogger_link_label"
         await cb.message.edit_text("OK, send the button text for the next link.")
-    else: # doneblogger
-        processing_msg = await cb.message.edit_text("✅ All links collected! Generating Blogger post...")
-        await generate_blogger_post(client, uid, cb.message.chat.id, processing_msg)
+    else:
+        msg = await cb.message.edit_text("✅ Generating Blogger post...")
+        await generate_blogger_post(client, uid, cb.message.chat.id, msg)
 
 async def generate_blogger_post(client, uid, cid, msg):
-    convo = user_conversations.get(uid);
+    convo = user_conversations.get(uid)
     if not convo: return
-    html_code = generate_html(convo["details"], convo["links"])
-    convo["generated_html"] = html_code; convo["state"] = "done"
+    html = generate_html(convo["details"], convo["links"])
+    convo["generated_html"] = html; convo["state"] = "done"
     if hasattr(msg, 'delete'): await msg.delete()
     await client.send_message(cid, f"✅ **Blogger Post Generated!**", reply_markup=InlineKeyboardMarkup(
         [[InlineKeyboardButton("📝 Get HTML Code", callback_data=f"get_html_{uid}")]]))
@@ -230,17 +220,14 @@ async def generate_blogger_post(client, uid, cid, msg):
 async def generate_channel_post(client, uid, cid, msg):
     convo = user_conversations.get(uid)
     if not convo: return
-    
+    await msg.edit_text("🎨 Downloading poster and applying watermark...")
     watermark_data = db_query("SELECT watermark_text FROM users WHERE user_id=?", (uid,), 'one')
     watermark = watermark_data[0] if watermark_data else None
     poster_url = f"https://image.tmdb.org/t/p/w500{convo['details']['poster_path']}" if convo['details'].get('poster_path') else None
-    
     caption = generate_channel_caption(convo["details"], convo["language"], convo["fixed_links"])
     
-    # Generate and store the poster in the conversation
-    convo["generated_poster"] = watermark_poster(poster_url, watermark)
-    watermarked_poster = convo["generated_poster"]
-    
+    watermarked_poster = watermark_poster(poster_url, watermark)
+    convo["generated_poster"] = watermarked_poster
     convo["generated_channel_post"] = {"caption": caption}
     convo["state"] = "done"
     
@@ -248,18 +235,16 @@ async def generate_channel_post(client, uid, cid, msg):
     channel_id = channel_data[0] if channel_data and channel_data[0] else None
     
     if hasattr(msg, 'delete'): await msg.delete()
-
-    # Show a preview to the user
     if watermarked_poster:
         watermarked_poster.seek(0)
         await client.send_photo(cid, photo=watermarked_poster, caption=caption)
     else:
+        await client.send_message(cid, "⚠️ **Warning:** Could not generate poster. Sending text-only preview.")
         await client.send_message(cid, caption)
         
     if channel_id:
-        await client.send_message(cid, "**👆 This is a preview.**\nDo you want to post this to your channel?",
+        await client.send_message(cid, "**👆 This is a preview.**\nPost to your channel?",
                                   reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 Yes, Post to Channel", callback_data=f"post_channel_{uid}")]]))
-
 
 @bot.on_callback_query(filters.regex("^(get_html|post_channel)_"))
 async def final_action_cb(client, cb: Message):
@@ -282,29 +267,20 @@ async def final_action_cb(client, cb: Message):
     elif action == "post_channel":
         post_data = convo.get("generated_channel_post")
         if not post_data: return await cb.answer("Channel post not generated.", show_alert=True)
-        
         channel_data = db_query("SELECT channel_id FROM users WHERE user_id=?", (uid,), 'one')
         channel_id = channel_data[0] if channel_data and channel_data[0] else None
         if not channel_id: return await cb.answer("Channel not set.", show_alert=True)
-        
         await cb.answer("Posting...", show_alert=False)
         try:
-            # Retrieve the saved poster from the conversation
             poster = convo.get("generated_poster")
             caption = post_data["caption"]
-
-            try: chat_id_int = int(channel_id)
-            except ValueError: chat_id_int = channel_id
-
+            chat_id_int = int(channel_id) if channel_id.startswith("-100") else channel_id
             if poster:
                 poster.seek(0)
                 await client.send_photo(chat_id_int, photo=poster, caption=caption)
             else:
                 await client.send_message(chat_id_int, caption)
-            
-            # Delete the preview and buttons
             await cb.message.delete()
-            # Send a confirmation
             await client.send_message(cb.from_user.id, f"✅ Successfully posted to `{channel_id}`!")
         except Exception as e:
             await cb.message.edit_text(f"❌ Failed to post. Error: {e}")
@@ -329,6 +305,6 @@ async def other_commands(client, message: Message):
 
 # ---- 5. START THE BOT ----
 if __name__ == "__main__":
-    print("🚀 Bot is starting... (100% Final Version with Photo Fix)")
+    print("🚀 Bot is starting... (100% Final, Bug-Fixed Version)")
     bot.run()
     print("👋 Bot has stopped.")

@@ -94,7 +94,6 @@ def get_tmdb_details(media_type: str, media_id: int):
         r = requests.get(url); r.raise_for_status(); return r.json()
     except: return None
 
-# --- NEW: Function to add watermark to the original poster ---
 def watermark_poster(poster_url: str, watermark_text: str):
     """Downloads a poster, adds a watermark, and returns it as a file object."""
     if not poster_url or not watermark_text: return None
@@ -118,7 +117,6 @@ def watermark_poster(poster_url: str, watermark_text: str):
         print(f"Watermarking error: {e}")
         return None
 
-# --- NEW: Function to generate the specific caption for Telegram channels ---
 def generate_channel_caption(data: dict, language: str, fixed_links: dict):
     """Generates the caption for the Telegram channel post."""
     title = data.get("title") or data.get("name") or "N/A"
@@ -132,7 +130,6 @@ def generate_channel_caption(data: dict, language: str, fixed_links: dict):
         "📥 **Download Links** 👇\n"
     )
     
-    # Add fixed links if they exist
     if fixed_links.get("480p"): caption += f"🔹 **480p:** [Link Here]({fixed_links['480p']})\n"
     if fixed_links.get("720p"): caption += f"🔹 **720p:** [Link Here]({fixed_links['720p']})\n"
     if fixed_links.get("1080p"): caption += f"🔹 **1080p:** [Link Here]({fixed_links['1080p']})\n"
@@ -140,7 +137,7 @@ def generate_channel_caption(data: dict, language: str, fixed_links: dict):
     return caption
 
 def generate_html(data: dict, all_links: list):
-    """Generates the HTML for Blogger (this function is mostly unchanged)."""
+    """Generates the HTML for Blogger."""
     title = data.get("title") or data.get("name") or "N/A"
     year = (data.get("release_date") or data.get("first_air_date") or "----")[:4]
     rating = round(data.get('vote_average', 0), 1)
@@ -151,7 +148,6 @@ def generate_html(data: dict, all_links: list):
     trailer_key = next((v['key'] for v in data.get('videos', {}).get('results', []) if v['site'] == 'YouTube'), None)
     
     trailer_button = f'<a href="https://www.youtube.com/watch?v={trailer_key}" target="_blank" class="trailer-button">🎬 Watch Trailer</a>' if trailer_key else ""
-    # Use all collected links for the HTML
     download_buttons = "".join([f'<a href="{link["url"]}" target="_blank">🔽 {link["label"]}</a>' for link in all_links])
     
     return f"""
@@ -162,7 +158,6 @@ def generate_html(data: dict, all_links: list):
 
 # ---- 4. BOT HANDLERS ----
 
-# -- Command Handlers --
 @bot.on_message(filters.command("start") & filters.private)
 @force_subscribe
 async def start_cmd(client, message: Message):
@@ -193,7 +188,6 @@ async def cancel_cmd(client, message: Message):
         del user_conversations[message.from_user.id]
         await message.reply_text("✅ Operation cancelled.")
 
-# -- Main Text and Conversation Handler --
 @bot.on_message(filters.text & filters.private & ~filters.command(["start", "setwatermark", "setchannel", "cancel"]))
 @force_subscribe
 async def main_handler(client, message: Message):
@@ -215,7 +209,6 @@ async def search_handler(client, message: Message):
     await processing_msg.edit_text("**👇 Choose from results:**", reply_markup=InlineKeyboardMarkup(buttons))
 
 async def conversation_flow_handler(client, message: Message):
-    """Manages the step-by-step conversation for collecting data."""
     uid = message.from_user.id
     convo = user_conversations.get(uid)
     if not convo: return
@@ -223,7 +216,6 @@ async def conversation_flow_handler(client, message: Message):
     state = convo.get("state")
     text = message.text.strip()
     
-    # State machine for conversation
     if state == "wait_language":
         convo["language"] = text
         convo["state"] = "wait_480p"
@@ -261,7 +253,6 @@ async def conversation_flow_handler(client, message: Message):
         ]
         await message.reply_text("Link added! Add another?", reply_markup=InlineKeyboardMarkup(buttons))
 
-# --- Callback Handlers ---
 @bot.on_callback_query(filters.regex("^select_"))
 async def selection_cb(client, cb: Message):
     await cb.answer("Fetching details...")
@@ -271,19 +262,14 @@ async def selection_cb(client, cb: Message):
 
     uid = cb.from_user.id
     user_conversations[uid] = {
-        "details": details,
-        "language": None,
-        "fixed_links": {},
-        "custom_links": [],
-        "state": "wait_language"
+        "details": details, "language": None, "fixed_links": {}, "custom_links": [], "state": "wait_language"
     }
-    await cb.message.edit_text(
-        "**Step 1: Language**\n\nPlease enter the language for this post (e.g., `English`, `Hindi Dubbed`)."
-    )
+    await cb.message.edit_text("**Step 1: Language**\n\nPlease enter the language for this post (e.g., `English`).")
 
 @bot.on_callback_query(filters.regex("^addcustom_"))
 async def custom_link_cb(client, cb: Message):
-    action, uid_str = cb.data.split("_", 1)
+    # <<< BUG FIX APPLIED HERE >>>
+    action, uid_str = cb.data.rsplit("_", 1)
     uid = int(uid_str)
     if cb.from_user.id != uid: return await cb.answer("Not for you!", show_alert=True)
     convo = user_conversations.get(uid)
@@ -291,54 +277,43 @@ async def custom_link_cb(client, cb: Message):
     
     if action == "addcustom_yes":
         convo["state"] = "wait_custom_label"
-        await cb.message.edit_text("**Custom Link:**\n\nPlease send the button text (e.g., `Episode 01 480p`).")
+        await cb.message.edit_text("**Custom Link:**\n\nPlease send the button text (e.g., `Episode 01`).")
     else: # "no"
         await cb.message.edit_text("✅ All info collected! Generating your posts now...")
         await generate_final_content(client, uid, cb.message.chat.id, cb.message)
 
-# -- Final Content Generation & Action Callbacks --
 async def generate_final_content(client, uid, cid, msg):
     convo = user_conversations.get(uid)
     if not convo: return
 
-    details = convo["details"]
-    lang = convo["language"]
-    fixed_links = convo["fixed_links"]
-    custom_links = convo["custom_links"]
+    details, lang, fixed_links, custom_links = convo["details"], convo["language"], convo["fixed_links"], convo["custom_links"]
     
-    # Prepare all links for Blogger
     all_blogger_links = []
     for q, url in fixed_links.items(): all_blogger_links.append({"label": f"Download {q}", "url": url})
     all_blogger_links.extend(custom_links)
 
-    await msg.edit_text("📝 Generating content for Blogger & Channel...")
+    await msg.edit_text("📝 Generating content...")
     html_code = generate_html(details, all_blogger_links)
     channel_caption = generate_channel_caption(details, lang, fixed_links)
     
-    await msg.edit_text("🎨 Applying watermark to poster...")
+    await msg.edit_text("🎨 Applying watermark...")
     watermark_data = db_query("SELECT watermark_text FROM users WHERE user_id=?", (uid,), 'one')
     watermark = watermark_data[0] if watermark_data else None
     poster_url = f"https://image.tmdb.org/t/p/w500{details['poster_path']}" if details.get('poster_path') else None
     watermarked_poster = watermark_poster(poster_url, watermark)
 
-    convo["generated"] = {
-        "html": html_code,
-        "channel_caption": channel_caption,
-        "channel_poster": watermarked_poster
-    }
+    convo["generated"] = {"html": html_code, "channel_caption": channel_caption, "channel_poster": watermarked_poster}
     convo["state"] = "done"
 
     channel_data = db_query("SELECT channel_id FROM users WHERE user_id=?", (uid,), 'one')
     channel_id = channel_data[0] if channel_data and channel_data[0] else None
     
     buttons = [[InlineKeyboardButton("📝 Get Blogger HTML", callback_data=f"get_html_{uid}")]]
-    if channel_id:
-        buttons.append([InlineKeyboardButton("📢 Post to Channel", callback_data=f"post_channel_{uid}")])
+    if channel_id: buttons.append([InlineKeyboardButton("📢 Post to Channel", callback_data=f"post_channel_{uid}")])
 
-    await msg.delete()
+    if hasattr(msg, 'from_user') and msg.from_user.is_self: await msg.delete()
     await client.send_message(
-        cid,
-        f"✅ **Content Generated for `{details.get('title') or details.get('name')}`**\n\nChoose an option below:",
+        cid, f"✅ **Content Generated for `{details.get('title') or details.get('name')}`**",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -372,7 +347,7 @@ async def final_action_cb(client, cb: Message):
             if poster:
                 poster.seek(0)
                 await client.send_photo(channel_id, photo=poster, caption=caption)
-            else: # Fallback if no poster
+            else:
                 await client.send_message(channel_id, caption)
             
             await cb.edit_message_reply_markup(reply_markup=None)
@@ -382,6 +357,6 @@ async def final_action_cb(client, cb: Message):
 
 # ---- 5. START THE BOT ----
 if __name__ == "__main__":
-    print("🚀 Bot is starting... (Dual-Format Final Version)")
+    print("🚀 Bot is starting... (Dual-Format, Clean Version)")
     bot.run()
     print("👋 Bot has stopped.")

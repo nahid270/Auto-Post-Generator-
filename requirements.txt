@@ -1,5 +1,5 @@
-pyrogram[tgcrypto]
-requests
-python-dotenv
-flask
+pyrogram
 Pillow
+requests
+Flask
+TgCrypto

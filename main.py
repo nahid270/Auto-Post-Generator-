@@ -69,7 +69,6 @@ def force_subscribe(func):
 
 # ---- 3. TMDB API & CONTENT GENERATION ----
 def search_tmdb(query: str):
-    # ... (code is unchanged)
     year, name = None, query.strip()
     match = re.search(r'(.+?)\s*\(?(\d{4})\)?$', query)
     if match: name, year = match.group(1).strip(), match.group(2)
@@ -78,13 +77,11 @@ def search_tmdb(query: str):
     except: return []
 
 def get_tmdb_details(media_type: str, media_id: int):
-    # ... (code is unchanged)
     url = f"https://api.themoviedb.org/3/{media_type}/{media_id}?api_key={TMDB_API_KEY}&append_to_response=credits,videos"
     try: r = requests.get(url, timeout=10); r.raise_for_status(); return r.json()
     except: return None
 
 def watermark_poster(poster_url: str, watermark_text: str):
-    # ... (code is unchanged, but now runs in background)
     if not poster_url: return None
     try:
         img_data = requests.get(poster_url, timeout=15).content
@@ -102,7 +99,6 @@ def watermark_poster(poster_url: str, watermark_text: str):
         return None
 
 def generate_channel_caption(data: dict, language: str, links: dict):
-    # ... (code is unchanged)
     title = data.get("title") or data.get("name") or "N/A"
     year = (data.get("release_date") or data.get("first_air_date") or "----")[:4]
     genres = ", ".join([g["name"] for g in data.get("genres", [])[:2]])
@@ -113,7 +109,6 @@ def generate_channel_caption(data: dict, language: str, links: dict):
     return caption
 
 def generate_html(data: dict, all_links: list):
-    # ... (code is unchanged)
     title = data.get("title") or data.get("name") or "N/A"
     year = (data.get("release_date") or data.get("first_air_date") or "----")[:4]
     overview = data.get("overview", "No overview available.")
@@ -126,7 +121,6 @@ def generate_html(data: dict, all_links: list):
     return f"""<style>.movie-card-container{{max-width:700px;margin:20px auto;background:#1c1c1c;border-radius:20px;padding:20px;color:#e0e0e0;font-family:sans-serif;}}.movie-content{{display:flex;flex-wrap:wrap;}}.movie-poster-container{{flex:1 1 200px;margin-right:20px;}}.movie-poster-container img{{width:100%;border-radius:15px;}}.movie-details{{flex:2 1 300px;}}.movie-details b{{color:#00e676;}}.backdrop-container img{{max-width:100%;border-radius:15px;margin-top:20px;}}.action-buttons{{text-align:center;margin-top:20px;}}.action-buttons a{{display:inline-block;background:linear-gradient(45deg,#ff512f,#dd2476);color:white!important;padding:12px 25px;margin:8px;border-radius:25px;text-decoration:none;}}.action-buttons .trailer-button{{background:#c4302b}}</style><div class="movie-card-container"><h2>{title} ({year})</h2><div class="movie-content"><div class="movie-poster-container"><img src="{poster}" alt="{title}"/></div><div class="movie-details"><p><b>Genre:</b> {genres}</p><p><b>Rating:</b> ⭐ {round(data.get('vote_average',0),1)}/10</p><p><b>Overview:</b> {overview}</p></div></div><div class="backdrop-container"><a href="{backdrop}" target="_blank"><img src="{backdrop}" alt="{title}"/></a></div><div class="action-buttons">{trailer_button}{download_buttons or ""}</div></div>"""
 
 # ---- 4. BOT HANDLERS ----
-# ... (start, search_commands, selection_cb, conversation_handler for blogger remain the same)
 @bot.on_message(filters.command("start") & filters.private)
 @force_subscribe
 async def start_cmd(client, message: Message):
@@ -173,7 +167,6 @@ async def conversation_handler(client, message: Message):
     state, text, flow = convo.get("state"), message.text.strip(), convo.get("flow")
 
     if flow == "blogger":
-        # ... (blogger conversation logic is unchanged)
         if state == "wait_blogger_link_label":
             convo["current_label"] = text; convo["state"] = "wait_blogger_link_url"
             await message.reply_text(f"OK, now send the URL for **'{text}'**.", parse_mode=enums.ParseMode.MARKDOWN)
@@ -184,7 +177,6 @@ async def conversation_handler(client, message: Message):
                        [InlineKeyboardButton("✅ Done", callback_data=f"doneblogger_{uid}")]]
             await message.reply_text("Link added! Add another?", reply_markup=InlineKeyboardMarkup(buttons))
     elif flow == "channelpost":
-        # ... (channel post conversation logic is unchanged)
         if state == "wait_channel_lang":
             convo["language"] = text; convo["state"] = "wait_480p"
             await message.reply_text("✅ Language set. Now, send **480p** link or `skip`.")
@@ -203,10 +195,9 @@ async def conversation_handler(client, message: Message):
 
 @bot.on_callback_query(filters.regex("^(addbloggerlink|doneblogger)_"))
 async def blogger_link_cb(client, cb: Message):
-    # ... (blogger callback logic is unchanged)
     action, uid_str = cb.data.split("_", 1); uid = int(uid_str)
     if cb.from_user.id != uid: return await cb.answer("Not for you!", show_alert=True)
-    convo = user_conversations.get(uid);
+    convo = user_conversations.get(uid)
     if not convo: return await cb.answer("Session expired.", show_alert=True)
     if action == "addbloggerlink":
         convo["state"] = "wait_blogger_link_label"
@@ -216,8 +207,7 @@ async def blogger_link_cb(client, cb: Message):
         await generate_blogger_post(client, uid, cb.message.chat.id, msg)
 
 async def generate_blogger_post(client, uid, cid, msg):
-    # ... (blogger generation logic is unchanged)
-    convo = user_conversations.get(uid);
+    convo = user_conversations.get(uid)
     if not convo: return
     html = generate_html(convo["details"], convo["links"])
     convo["generated_html"] = html; convo["state"] = "done"
@@ -225,10 +215,8 @@ async def generate_blogger_post(client, uid, cid, msg):
     await client.send_message(cid, f"✅ **Blogger Post Generated!**", reply_markup=InlineKeyboardMarkup(
         [[InlineKeyboardButton("📝 Get HTML Code", callback_data=f"get_html_{uid}")]]), parse_mode=enums.ParseMode.MARKDOWN)
 
-# ---- NEW ASYNCHRONOUS WORKFLOW FOR CHANNEL POST ----
-
+# ---- ASYNCHRONOUS WORKFLOW FOR CHANNEL POST ----
 async def process_image_in_background(client, uid, cid, preview_msg_id):
-    """This function runs in the background to avoid blocking."""
     convo = user_conversations.get(uid)
     if not convo: return
 
@@ -236,7 +224,6 @@ async def process_image_in_background(client, uid, cid, preview_msg_id):
     watermark = watermark_data[0] if watermark_data else None
     poster_url = f"https://image.tmdb.org/t/p/w500{convo['details']['poster_path']}" if convo['details'].get('poster_path') else None
     
-    # This is the slow part
     watermarked_poster = watermark_poster(poster_url, watermark)
     
     convo["generated_poster"] = watermarked_poster
@@ -250,49 +237,40 @@ async def process_image_in_background(client, uid, cid, preview_msg_id):
         if watermarked_poster:
             watermarked_poster.seek(0)
             await client.edit_message_media(
-                chat_id=cid,
-                message_id=preview_msg_id,
-                media=enums.InputMediaPhoto(media=watermarked_poster, caption=convo["generated_channel_post"]["caption"])
+                chat_id=cid, message_id=preview_msg_id,
+                media=enums.InputMediaPhoto(media=watermarked_poster)
             )
-            # After editing media, we need to edit the caption and reply_markup separately
             await client.edit_message_caption(
-                chat_id=cid,
-                message_id=preview_msg_id,
+                chat_id=cid, message_id=preview_msg_id,
                 caption=convo["generated_channel_post"]["caption"],
                 reply_markup=InlineKeyboardMarkup(buttons),
                 parse_mode=enums.ParseMode.MARKDOWN
             )
         else:
             await client.edit_message_text(
-                chat_id=cid,
-                message_id=preview_msg_id,
+                chat_id=cid, message_id=preview_msg_id,
                 text=convo["generated_channel_post"]["caption"] + "\n\n⚠️ **Poster generation failed.**",
-                reply_markup=InlineKeyboardMarkup(buttons),
-                parse_mode=enums.ParseMode.MARKDOWN
+                reply_markup=InlineKeyboardMarkup(buttons), parse_mode=enums.ParseMode.MARKDOWN
             )
-    except MessageNotModified:
-        pass # It's okay if the message is the same
+    except MessageNotModified: pass
     except Exception as e:
         print(f"Error updating preview message: {e}")
         await client.edit_message_text(cid, preview_msg_id, "❌ An error occurred while generating the poster.")
-
 
 async def generate_channel_post(client, uid, cid, msg):
     convo = user_conversations.get(uid)
     if not convo: return
     
-    # Instantly generate the caption
     caption = generate_channel_caption(convo["details"], convo["language"], convo["fixed_links"])
     convo["generated_channel_post"] = {"caption": caption}
     
-    # Delete the user's last message and the bot's "generating" message
     if hasattr(msg, 'delete'): await msg.delete()
     
-    # Send an initial text-only preview immediately
-    preview_msg = await client.send_message(cid, caption + "\n\n🖼️ _Preparing poster, please wait..._", parse_mode=enums.ParseMode.MARKDOWN)
+    preview_msg = await client.send_message(
+        cid, caption + "\n\n🖼️ _Preparing poster, please wait..._", parse_mode=enums.ParseMode.MARKDOWN
+    )
     
-    # Start the image processing in the background
-    asyncio.create_task(process_image_in_background(client, uid, cid, preview_msg.id))
+    bot.loop.create_task(process_image_in_background(client, uid, cid, preview_msg.id))
 
 @bot.on_callback_query(filters.regex("^(get_html|post_channel)_"))
 async def final_action_cb(client, cb: Message):
@@ -301,19 +279,20 @@ async def final_action_cb(client, cb: Message):
     if cb.from_user.id != uid: return await cb.answer("Not for you!", show_alert=True)
     convo = user_conversations.get(uid)
     
-    # Add a check for poster status
     if action == "post_channel" and convo.get("state") != "done":
         return await cb.answer("⏳ Please wait, the poster is still being prepared...", show_alert=True)
         
     if not convo: return await cb.answer("Session expired.", show_alert=True)
 
     if action == "get_html":
-        # ... (unchanged)
         html = convo.get("generated_html")
         if not html: return await cb.answer("HTML not generated.", show_alert=True)
         await cb.answer()
-        if len(html) > 4000: title = (convo["details"].get("title") or "post").replace(" ", "_"); await client.send_document(cb.message.chat.id, document=io.BytesIO(html.encode('utf-8')), file_name=f"{title}.html")
-        else: await client.send_message(cb.message.chat.id, f"```html\n{html}\n```", parse_mode=enums.ParseMode.MARKDOWN)
+        if len(html) > 4000:
+            title = (convo["details"].get("title") or "post").replace(" ", "_")
+            await client.send_document(cb.message.chat.id, document=io.BytesIO(html.encode('utf-8')), file_name=f"{title}.html")
+        else:
+            await client.send_message(cb.message.chat.id, f"```html\n{html}\n```", parse_mode=enums.ParseMode.MARKDOWN)
 
     elif action == "post_channel":
         post_data = convo.get("generated_channel_post")
@@ -324,8 +303,7 @@ async def final_action_cb(client, cb: Message):
         
         await cb.answer("Posting...", show_alert=False)
         try:
-            poster = convo.get("generated_poster")
-            caption = post_data["caption"]
+            poster, caption = convo.get("generated_poster"), post_data["caption"]
             chat_id_int = int(channel_id) if channel_id.startswith("-100") else channel_id
             if poster:
                 poster.seek(0)
@@ -354,6 +332,6 @@ async def other_commands(client, message: Message):
 
 # ---- 5. START THE BOT ----
 if __name__ == "__main__":
-    print("🚀 Bot is starting... (Asynchronous Final Version)")
+    print("🚀 Bot is starting... (Asynchronous Final, Bug-Fixed Version)")
     bot.run()
     print("👋 Bot has stopped.")

@@ -27,7 +27,7 @@ INVITE_LINK = os.getenv("INVITE_LINK")
 
 # ---- আপনার চ্যানেলের লিংক এখানে যুক্ত করুন ----
 JOIN_CHANNEL_TEXT = "🎬 সকল মুভি এবং সিরিজের আপডেট পেতে"
-JOIN_CHANNEL_LINK = "https://t.me/YourChannelUsername" # এখানে আপনার চ্যানেলের লিংক দিন
+JOIN_CHANNEL_LINK = "https://t.me/+60goZWp-FpkxNzVl" # এখানে আপনার চ্যানেলের লিংক দিন
 
 
 # ---- Database Setup ----
@@ -155,7 +155,6 @@ async def start_cmd(client, message: Message):
 @bot.on_message(filters.command(["post", "blogger"]) & filters.private)
 @force_subscribe
 async def search_commands(client, message: Message):
-    # ... (এই কোড অপরিবর্তিত) ...
     command = message.command[0].lower()
     if len(message.command) == 1:
         return await message.reply_text(f"**ব্যবহার:** `/{command} Movie Name`", parse_mode=enums.ParseMode.MARKDOWN)
@@ -175,7 +174,6 @@ async def search_commands(client, message: Message):
 @bot.on_message(filters.command("quickpost") & filters.private)
 @force_subscribe
 async def quick_post_search(client, message: Message):
-    # ... (এই কোড অপরিবর্তিত) ...
     if len(message.command) == 1:
         return await message.reply_text("**ব্যবহার:** `/quickpost Movie Name`", parse_mode=enums.ParseMode.MARKDOWN)
 
@@ -197,7 +195,6 @@ async def quick_post_search(client, message: Message):
 
 @bot.on_callback_query(filters.regex("^qpost_"))
 async def quick_post_select(client, cb: Message):
-    # ... (এই কোড অপরিবর্তিত) ...
     await cb.message.edit("⏳ পোস্ট তৈরি করা হচ্ছে...")
     try: _, media_type, media_id = cb.data.split("_", 2); media_id = int(media_id)
     except: return await cb.message.edit("❌ অবৈধ অনুরোধ।")
@@ -229,7 +226,6 @@ async def quick_post_select(client, cb: Message):
 
 @bot.on_callback_query(filters.regex("^select_"))
 async def selection_cb(client, cb: Message):
-    # ... (এই কোড অপরিবর্তিত) ...
     await cb.answer("Fetching details...")
     try: _, flow, media_type, mid = cb.data.split("_", 3)
     except: return await cb.message.edit_text("Invalid callback.")
@@ -243,12 +239,9 @@ async def selection_cb(client, cb: Message):
         await cb.message.edit_text("**চ্যানেল পোস্ট:** পোস্টের জন্য ভাষা লিখুন। (যেমন: বাংলা, ইংরেজি)")
 
 
-# ---- ✨ কনভারসেশন হ্যান্ডলার আপডেট করা হয়েছে ✨ ----
-# ~filters.command(...) লিস্টে "testpost" যোগ করা হয়েছে
 @bot.on_message(filters.text & filters.private & ~filters.command(["start", "post", "blogger", "quickpost", "setwatermark", "setchannel", "cancel", "testpost"]))
 @force_subscribe
 async def conversation_handler(client, message: Message):
-    # ... (এই কোড অপরিবর্তিত) ...
     uid, convo = message.from_user.id, user_conversations.get(message.from_user.id)
     if not convo or "state" not in convo: return
     state, text = convo["state"], message.text.strip()
@@ -269,7 +262,6 @@ async def conversation_handler(client, message: Message):
         await generate_final_post_preview(client, uid, message.chat.id, msg)
 
 async def generate_final_post_preview(client, uid, cid, msg):
-    # ... (এই কোড অপরিবর্তিত) ...
     convo = user_conversations.get(uid)
     if not convo: return
     caption = generate_channel_caption(convo["details"], convo["language"], convo["fixed_links"])
@@ -294,7 +286,6 @@ async def generate_final_post_preview(client, uid, cid, msg):
 
 @bot.on_callback_query(filters.regex("^finalpost_"))
 async def post_to_channel_cb(client, cb: Message):
-    # ... (এই কোড অপরিবর্তিত) ...
     uid = int(cb.data.split("_")[1])
     if cb.from_user.id != uid: return await cb.answer("This is not for you!", show_alert=True)
     
@@ -317,7 +308,6 @@ async def post_to_channel_cb(client, cb: Message):
         if uid in user_conversations: del user_conversations[uid]
 
 
-# ---- ✨ নতুন পরীক্ষামূলক কমান্ড (ডায়াগনস্টিক টুল) ✨ ----
 @bot.on_message(filters.command("testpost") & filters.private)
 @force_subscribe
 async def test_post_command(client, message: Message):
@@ -345,21 +335,25 @@ async def test_post_command(client, message: Message):
         await processing_msg.edit(error_message)
 
 
+# ---- ✨ এখানে সমস্যার সমাধান করা হয়েছে ✨ ----
 @bot.on_message(filters.command(["setwatermark", "setchannel", "cancel"]))
 @force_subscribe
 async def settings_commands(client, message: Message):
-    # ... (এই কোড অপরিবর্তিত) ...
     command, uid = message.command[0].lower(), message.from_user.id
     if command == "setwatermark":
         text = " ".join(message.command[1:]) if len(message.command) > 1 else None
-        db_query("UPDATE users SET watermark_text = ? WHERE user_id = ?", (text, uid))
+        # ওয়াটারমার্কের জন্যও Upsert ব্যবহার করা ভালো অভ্যাস
+        db_query("INSERT INTO users (user_id, watermark_text) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET watermark_text = excluded.watermark_text", (uid, text))
         await message.reply_text(f"✅ ওয়াটারমার্ক {'সেট হয়েছে: `' + text + '`' if text else 'মুছে ফেলা হয়েছে।'}", parse_mode=enums.ParseMode.MARKDOWN)
+    
     elif command == "setchannel":
         if len(message.command) > 1 and message.command[1].startswith("-100") and message.command[1][1:].isdigit():
             cid = message.command[1]
-            db_query("UPDATE users SET channel_id = ? WHERE user_id = ?", (cid, uid))
+            # ---- পুরনো UPDATE কোয়েরিটি নিচের Upsert দিয়ে প্রতিস্থাপন করা হয়েছে ----
+            db_query("INSERT INTO users (user_id, channel_id) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET channel_id = excluded.channel_id", (uid, cid))
             await message.reply_text(f"✅ চ্যানেল সেট হয়েছে: `{cid}`", parse_mode=enums.ParseMode.MARKDOWN)
         else: await message.reply_text("⚠️ অবৈধ চ্যানেল আইডি। আইডি অবশ্যই `-100` দিয়ে শুরু হতে হবে।")
+    
     elif command == "cancel":
         if uid in user_conversations: del user_conversations[uid]; await message.reply_text("✅ প্রক্রিয়া বাতিল করা হয়েছে।")
         else: await message.reply_text("🚫 বাতিল করার মতো কোনো প্রক্রিয়া চালু নেই।")

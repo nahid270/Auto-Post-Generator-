@@ -11,7 +11,7 @@ from threading import Thread
 # --- Third-party Library Imports ---
 from PIL import Image, ImageDraw, ImageFont
 from pyrogram import Client, filters, enums
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
 from pyrogram.errors import UserNotParticipant
 from flask import Flask
 from dotenv import load_dotenv
@@ -108,7 +108,7 @@ def watermark_poster(poster_url: str, watermark_text: str):
                 dominant_color = sorted(colors, key=lambda x: x[0], reverse=True)[0][1]
                 text_color = (255 - dominant_color[0], 255 - dominant_color[1], 255 - dominant_color[2], 230)
             else:
-                text_color = (255, 255, 255, 230) # Default to white if no dominant color found
+                text_color = (255, 255, 255, 230)
 
             bbox = draw.textbbox((0, 0), watermark_text, font=font)
             text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -180,8 +180,6 @@ async def start_cmd(client, message: Message):
         "🔹 `/setwatermark <text>` - পোস্টারে আপনার ওয়াটারমার্ক সেট করুন।\n"
         "🔹 `/cancel` - যেকোনো চলমান প্রক্রিয়া বাতিল করুন।")
 
-# ... (বাকি সব হ্যান্ডলার অপরিবর্তিত) ...
-# Note: All database calls are now async and use the 'users_collection'
 @bot.on_message(filters.command(["setwatermark", "setchannel", "cancel"]))
 @force_subscribe
 async def settings_commands(client, message: Message):
@@ -216,8 +214,7 @@ async def generate_final_post_preview(client, uid, cid, msg):
     
     user_data = await users_collection.find_one({'_id': uid})
     watermark = user_data.get('watermark_text') if user_data else None
-    channel_id = user_data.get('channel_id') if user_data else None
-
+    
     poster_url = f"https://image.tmdb.org/t/p/w500{convo['details']['poster_path']}" if convo['details'].get('poster_path') else None
     
     await msg.edit_text("🖼️ পোস্টার তৈরি এবং ওয়াটারমার্ক যোগ করা হচ্ছে...")
@@ -227,15 +224,25 @@ async def generate_final_post_preview(client, uid, cid, msg):
     if error:
         await client.send_message(cid, f"⚠️ **পোস্টার তৈরিতে সমস্যা:** `{error}`")
 
+    # Store a copy of the poster buffer in the conversation
+    poster_buffer = None
+    if poster:
+        poster.seek(0)
+        poster_buffer = io.BytesIO(poster.read())
+        poster.seek(0) # Reset pointer for sending
+
     preview_msg = await client.send_photo(cid, photo=poster, caption=caption, parse_mode=enums.ParseMode.MARKDOWN) if poster else await client.send_message(cid, caption, parse_mode=enums.ParseMode.MARKDOWN)
     
+    # Store the final post data for the channel posting callback
+    user_conversations[uid]['final_post'] = {'caption': caption, 'poster': poster_buffer}
+
+    # Only show the "Post to Channel" button if a channel is set
+    channel_id = user_data.get('channel_id') if user_data else None
     if channel_id:
         await client.send_message(cid, "**👆 এটি একটি প্রিভিউ।**\nআপনার চ্যানেলে পোস্ট করবেন?",
             reply_to_message_id=preview_msg.id,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 হ্যাঁ, চ্যানেলে পোস্ট করুন", callback_data=f"finalpost_{uid}")]]))
-    user_conversations[uid]['final_post'] = {'caption': caption, 'poster': poster}
-    
-# (বাকি সব কোড অপরিবর্তিত থাকবে)
+
 @bot.on_message(filters.command(["post", "blogger"]) & filters.private)
 @force_subscribe
 async def search_commands(client, message: Message):
@@ -298,7 +305,7 @@ async def conversation_handler(client, message: Message):
         await message.reply_text(f"✅ সিজন {season_num}-এর লিংক যোগ করা হয়েছে।\n\n**👉 পরবর্তী সিজনের নম্বর লিখুন, অথবা পোস্ট শেষ করতে `done` লিখুন।**")
 
 @bot.on_callback_query(filters.regex("^select_"))
-async def selection_cb(client, cb: Message):
+async def selection_cb(client, cb: CallbackQuery):
     await cb.answer("Fetching details...")
     try: _, flow, media_type, mid = cb.data.split("_", 3)
     except: return await cb.message.edit_text("Invalid callback.")
@@ -314,7 +321,70 @@ async def selection_cb(client, cb: Message):
     elif media_type == "movie":
         user_conversations[uid]["state"] = "wait_movie_lang"
         await cb.message.edit_text("**মুভি পোস্ট:** মুভিটির জন্য ভাষা লিখুন।")
+
+# ---- ⭐️ সমাধান: এই নতুন হ্যান্ডলারটি যোগ করা হয়েছে ⭐️ ----
+@bot.on_callback_query(filters.regex("^finalpost_"))
+async def post_to_channel_cb(client, cb: CallbackQuery):
+    uid = cb.from_user.id
+    
+    # ডেটাবেস থেকে চ্যানেল আইডি নিন
+    user_data = await users_collection.find_one({'_id': uid})
+    channel_id = user_data.get('channel_id') if user_data else None
+
+    # ১. চ্যানেল সেট করা আছে কিনা তা পরীক্ষা করুন
+    if not channel_id:
+        await cb.answer("⚠️ চ্যানেল সেট করা নেই!", show_alert=True)
+        return await cb.message.edit_text("আপনি এখনও কোনো চ্যানেল সেট করেননি। `/setchannel <ID>` কমান্ড ব্যবহার করুন।")
+
+    # ২. কথোপকথনের ডেটা موجود আছে কিনা তা পরীক্ষা করুন
+    convo = user_conversations.get(uid)
+    if not convo or 'final_post' not in convo:
+        await cb.answer("❌ সেশন শেষ হয়ে গেছে!", show_alert=True)
+        return await cb.message.edit_text("দুঃখিত, এই পোস্টের তথ্য আর পাওয়া যাচ্ছে না। অনুগ্রহ করে আবার শুরু করুন।")
+
+    await cb.answer("⏳ পোস্ট করা হচ্ছে...", show_alert=False)
+    
+    final_post = convo['final_post']
+    caption = final_post['caption']
+    poster = final_post['poster']
+
+    # ৩. চ্যানেলে পোস্ট করার চেষ্টা করুন
+    try:
+        if poster:
+            # পোস্টার থাকলে ছবি সহ পোস্ট করুন
+            poster.seek(0) # Ensure buffer is at the beginning
+            await client.send_photo(
+                chat_id=int(channel_id),
+                photo=poster,
+                caption=caption,
+                parse_mode=enums.ParseMode.MARKDOWN
+            )
+        else:
+            # পোস্টার না থাকলে শুধু টেক্সট পোস্ট করুন
+            await client.send_message(
+                chat_id=int(channel_id),
+                text=caption,
+                parse_mode=enums.ParseMode.MARKDOWN
+            )
         
+        # সফল হলে ব্যবহারকারীকে জানান
+        await cb.message.edit_text("✅ **সফলভাবে আপনার চ্যানেলে পোস্ট করা হয়েছে!**")
+
+    except Exception as e:
+        # কোনো সমস্যা হলে ব্যবহারকারীকে ত্রুটি সম্পর্কে জানান
+        error_message = (f"❌ **চ্যানেলে পোস্ট করতে সমস্যা হয়েছে।**\n\n"
+                         f"**সম্ভাব্য কারণ:**\n"
+                         f"1. বট কি আপনার চ্যানেলের (`{channel_id}`) সদস্য?\n"
+                         f"2. বটের কি 'Post Messages' করার অনুমতি আছে?\n"
+                         f"3. চ্যানেল আইডি কি সঠিক?\n\n"
+                         f"**Error:** `{e}`")
+        await cb.message.edit_text(error_message)
+
+    finally:
+        # ৪. কাজ শেষে কথোপকথনের ডেটা মুছে ফেলুন
+        if uid in user_conversations:
+            del user_conversations[uid]
+
 # ---- 5. START THE BOT ----
 if __name__ == "__main__":
     print("🚀 Bot is starting with MongoDB connection...")

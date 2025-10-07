@@ -1,6 +1,7 @@
 pyrogram
 Pillow
-requests
-Flask
-TgCrypto
+flask
 python-dotenv
+requests
+motor
+TgCrypto

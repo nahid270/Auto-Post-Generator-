@@ -25,6 +25,12 @@ TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 FORCE_SUB_CHANNEL = os.getenv("FORCE_SUB_CHANNEL")
 INVITE_LINK = os.getenv("INVITE_LINK")
 
+# ---- ✨ আপনার চ্যানেলের লিংক এখানে যুক্ত করুন ✨ ----
+# নিচের দুটি লাইন পরিবর্তন করে আপনার চ্যানেলের তথ্য দিন।
+JOIN_CHANNEL_TEXT = "🎬 সকল মুভি এবং সিরিজের আপডেট পেতে"
+JOIN_CHANNEL_LINK = "https://t.me/+60goZWp-FpkxNzVl" # এখানে আপনার চ্যানেলের লিংক দিন
+
+
 # ---- Database Setup ----
 DB_FILE = "bot_settings.db"
 def db_query(query, params=(), fetch=None):
@@ -60,6 +66,16 @@ def force_subscribe(func):
         await func(client, message)
     return wrapper
 
+def format_runtime(minutes: int):
+    if not minutes or not isinstance(minutes, int):
+        return "N/A"
+    hours = minutes // 60
+    mins = minutes % 60
+    if hours > 0:
+        return f"{hours}h {mins}m"
+    return f"{mins}m"
+
+
 # ---- 3. TMDB API & CONTENT GENERATION ----
 def search_tmdb(query: str):
     year, name = None, query.strip()
@@ -93,14 +109,12 @@ def watermark_poster(poster_url: str, watermark_text: str):
         if watermark_text:
             draw = ImageDraw.Draw(img)
             try:
-                # Make sure 'Poppins-Bold.ttf' is in the same folder as your script
                 font = ImageFont.truetype("Poppins-Bold.ttf", 25)
             except IOError:
                 font = ImageFont.load_default()
             bbox = draw.textbbox((0, 0), watermark_text, font=font)
             text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
             x, y = img.width - text_width - 20, img.height - text_height - 20
-            # Shadow for better visibility
             draw.text((x+1, y+1), watermark_text, font=font, fill=(0, 0, 0, 128))
             draw.text((x, y), watermark_text, font=font, fill=(255, 255, 255, 220))
         buffer = io.BytesIO()
@@ -113,17 +127,42 @@ def watermark_poster(poster_url: str, watermark_text: str):
     except Exception as e:
         return None, f"Image processing error. Is 'Poppins-Bold.ttf' missing? Error: {e}"
 
+# ---- নতুন এবং উন্নত ক্যাপশন ফাংশন ----
 def generate_channel_caption(data: dict, language: str, links: dict):
     title = data.get("title") or data.get("name") or "N/A"
     year = (data.get("release_date") or data.get("first_air_date") or "----")[:4]
-    genres = ", ".join([g["name"] for g in data.get("genres", [])[:2]])
-    caption = f"🎬 **{title} ({year})**\n\n🎭 **ধরন:** {genres}\n🔊 **ভাষা:** {language}\n\n📥 **ডাউনলোড লিংক** 👇\n"
+    genres = ", ".join([g["name"] for g in data.get("genres", [])[:3]]) or "N/A"
+    rating = f"{data.get('vote_average', 0):.1f}/10"
+    
+    runtime_min = data.get("runtime") or (data.get("episode_run_time", [0])[0])
+    runtime = format_runtime(runtime_min)
+    
+    overview = data.get("overview", "কাহিনী সংক্ষেপ পাওয়া যায়নি।")
+    if len(overview) > 250:
+        overview = overview[:250] + "..."
+
+    cast_list = [actor['name'] for actor in data.get('credits', {}).get('cast', [])[:3]]
+    cast = ", ".join(cast_list) or "N/A"
+
+    caption = (
+        f"🎬 **{title} ({year})**\n\n"
+        f"⭐️ **রেটিং:** {rating}\n"
+        f"🎭 **ধরন:** {genres}\n"
+        f"🔊 **ভাষা:** {language}\n"
+        f"⏰ **রানটাইম:** {runtime}\n"
+        f"👥 **অভিনয়ে:** {cast}\n\n"
+        f"📝 **কাহিনী সংক্ষেপ:** {overview}\n\n"
+        "📥 **ডাউনলোড লিংক** 👇\n"
+    )
+
     if links.get("480p"): caption += f"🔹 **480p:** [ডাউনলোড করুন]({links['480p']})\n"
     if links.get("720p"): caption += f"🔹 **720p:** [ডাউনলোড করুন]({links['720p']})\n"
     if links.get("1080p"): caption += f"🔹 **1080p:** [ডাউনলোড করুন]({links['1080p']})\n"
+    
+    if JOIN_CHANNEL_TEXT and JOIN_CHANNEL_LINK:
+        caption += f"\n---\n**আমাদের অন্য চ্যানেলে যোগ দিন 👇**\n[👉 {JOIN_CHANNEL_TEXT}]({JOIN_CHANNEL_LINK})"
+        
     return caption
-
-# Other helper functions like generate_html can be added here if needed for /blogger
 
 # ---- 4. BOT HANDLERS ----
 @bot.on_message(filters.command("start") & filters.private)
@@ -202,8 +241,10 @@ async def quick_post_select(client, cb: Message):
 
     title = details.get("title") or details.get("name")
     year = (details.get("release_date") or details.get("first_air_date") or "----")[:4]
-    rating = round(details.get("vote_average", 0), 1)
-    caption = f"🎬 **{title} ({year})**\n⭐️ **Rating:** {rating}/10"
+    rating = f"{details.get('vote_average', 0):.1f}/10"
+    caption = f"🎬 **{title} ({year})**\n⭐️ **রেটিং:** {rating}"
+    if JOIN_CHANNEL_TEXT and JOIN_CHANNEL_LINK:
+        caption += f"\n\n[👉 {JOIN_CHANNEL_TEXT}]({JOIN_CHANNEL_LINK})"
 
     poster_url = f"https://image.tmdb.org/t/p/w500{details['poster_path']}" if details.get('poster_path') else None
     poster, error = watermark_poster(poster_url, watermark_text)
@@ -235,9 +276,8 @@ async def selection_cb(client, cb: Message):
         await cb.message.edit("Blogger flow is not fully implemented in this version yet.") # Placeholder
     elif flow == "post":
         user_conversations[uid]["state"] = "wait_channel_lang"
-        await cb.message.edit_text("**চ্যানেল পোস্ট:** পোস্টের জন্য ভাষা লিখুন।")
+        await cb.message.edit_text("**চ্যানেল পোস্ট:** পোস্টের জন্য ভাষা লিখুন। (যেমন: বাংলা, ইংরেজি)")
 
-# ---- CORRECTED LINE IS HERE ----
 @bot.on_message(filters.text & filters.private & ~filters.command(["start", "post", "blogger", "quickpost", "setwatermark", "setchannel", "cancel"]))
 @force_subscribe
 async def conversation_handler(client, message: Message):

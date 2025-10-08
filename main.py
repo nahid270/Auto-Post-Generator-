@@ -85,7 +85,6 @@ async def shorten_link(user_id: int, long_url: str):
     base_url = user_data['shortener_url']
     
     # Construct the API URL. This format is common for many shorteners (e.g., Zagl, ShrinkEarn).
-    # You may need to adjust this if your shortener has a different API structure.
     api_url = f"https://{base_url}/api?api={api_key}&url={long_url}"
     
     try:
@@ -160,7 +159,6 @@ def watermark_poster(poster_url: str, watermark_text: str):
     except requests.exceptions.RequestException as e: return None, f"Network Error: {e}"
     except Exception as e: return None, f"Image processing error. Error: {e}"
 
-# 🔄 MODIFIED: Added user_data to include tutorial link
 async def generate_channel_caption(data: dict, language: str, links: dict, user_data: dict):
     title = data.get("title") or data.get("name") or "N/A"
     year = (data.get("release_date") or data.get("first_air_date") or "----")[:4]
@@ -200,7 +198,6 @@ async def generate_channel_caption(data: dict, language: str, links: dict, user_
 
     caption = caption_header + link_section
 
-    # ⭐️ NEW: Add tutorial link if it exists
     if user_data and user_data.get('tutorial_link'):
         caption += f"\n🎥 **কিভাবে ডাউনলোড করবেন:** [টিউটোরিয়াল দেখুন]({user_data['tutorial_link']})"
 
@@ -221,11 +218,12 @@ async def start_cmd(client, message: Message):
         "🔹 `/settings` - আপনার বর্তমান সেটিংস দেখুন।\n"
         "🔹 `/setchannel <ID>` - পোস্ট করার জন্য চ্যানেল আইডি সেট করুন।\n"
         "🔹 `/setwatermark <text>` - পোস্টারে ওয়াটারমার্ক সেট করুন।\n"
-        "🔹 `/setshortener <API> <URL>` - লিঙ্ক শর্টনার সেট করুন।\n"
+        "🔹 `/setapi <API_KEY>` - আপনার লিঙ্ক শর্টনারের API Key সেট করুন।\n"
+        "🔹 `/setdomain <URL>` - আপনার শর্টনার ডোমেইন সেট করুন (e.g., yoursite.com)।\n"
         "🔹 `/settutorial <link>` - ডাউনলোড টিউটোরিয়াল লিঙ্ক সেট করুন।")
 
-# 🔄 MODIFIED: Combined all settings commands into one handler
-@bot.on_message(filters.command(["setwatermark", "setchannel", "cancel", "setshortener", "settutorial", "settings"]) & filters.private)
+# 🔄 পরিবর্তন: লিঙ্ক শর্টনার কমান্ডগুলো আলাদা করা হয়েছে এবং settings কমান্ডের সাথে যুক্ত করা হয়েছে।
+@bot.on_message(filters.command(["setwatermark", "setchannel", "cancel", "setapi", "setdomain", "settutorial", "settings"]) & filters.private)
 @force_subscribe
 async def settings_commands(client, message: Message):
     command = message.command[0].lower()
@@ -252,21 +250,23 @@ async def settings_commands(client, message: Message):
         else:
             await message.reply_text("🚫 বাতিল করার মতো কোনো প্রক্রিয়া চালু নেই।")
 
-    # ⭐️ NEW: Shortener command handler
-    elif command == "setshortener":
-        if len(message.command) == 3:
-            api_key, base_url = message.command[1], message.command[2]
-            await users_collection.update_one(
-                {'_id': uid},
-                {'$set': {'shortener_api': api_key, 'shortener_url': base_url}},
-                upsert=True
-            )
-            await message.reply_text(f"✅ লিঙ্ক শর্টনার সেট হয়েছে!\n**API Key:** `{api_key}`\n**Base URL:** `{base_url}`")
-        elif len(message.command) == 1:
-            await users_collection.update_one({'_id': uid}, {'$unset': {'shortener_api': "", 'shortener_url': ""}})
-            await message.reply_text("✅ লিঙ্ক শর্টনারের তথ্য মুছে ফেলা হয়েছে। লিঙ্ক আর শর্ট করা হবে না।")
+    # ⭐️ NEW: Shortener API command handler
+    elif command == "setapi":
+        if len(message.command) > 1:
+            api_key = message.command[1]
+            await users_collection.update_one({'_id': uid}, {'$set': {'shortener_api': api_key}}, upsert=True)
+            await message.reply_text(f"✅ শর্টনার API Key সেট হয়েছে: `{api_key}`")
         else:
-            await message.reply_text("⚠️ ভুল ফরম্যাট!\n**ব্যবহার:** `/setshortener <API_KEY> <yourshortener.com>`\n**মুছে ফেলতে:** `/setshortener`")
+            await message.reply_text("⚠️ ভুল ফরম্যাট!\n**ব্যবহার:** `/setapi <আপনার_API_KEY>`")
+
+    # ⭐️ NEW: Shortener Domain command handler
+    elif command == "setdomain":
+        if len(message.command) > 1:
+            domain = message.command[1]
+            await users_collection.update_one({'_id': uid}, {'$set': {'shortener_url': domain}}, upsert=True)
+            await message.reply_text(f"✅ শর্টনার ডোমেইন সেট হয়েছে: `{domain}`")
+        else:
+            await message.reply_text("⚠️ ভুল ফরম্যাট!\n**ব্যবহার:** `/setdomain yourshortener.com` (http:// বা https:// ছাড়া)।")
 
     # ⭐️ NEW: Tutorial command handler
     elif command == "settutorial":
@@ -295,7 +295,7 @@ async def settings_commands(client, message: Message):
             settings_text += f"**শর্টনার API:** `{shortener_api}`\n"
             settings_text += f"**শর্টনার URL:** `{shortener_url}`\n"
         else:
-            settings_text += "**শর্টনার:** `সেট করা নেই`\n"
+            settings_text += "**শর্টনার:** `সেট করা নেই` (API ও ডোমেইন দুটোই সেট করুন)\n"
             
         await message.reply_text(settings_text)
 
@@ -305,7 +305,6 @@ async def generate_final_post_preview(client, uid, cid, msg):
     
     user_data = await users_collection.find_one({'_id': uid})
     
-    # 🔄 MODIFIED: Pass user_data to caption generator
     caption = await generate_channel_caption(convo["details"], convo["language"], convo["links"], user_data)
     
     watermark = user_data.get('watermark_text') if user_data else None
@@ -352,11 +351,6 @@ async def search_commands(client, message: Message):
         buttons.append([InlineKeyboardButton(f"{media_icon} {title} ({year})", callback_data=f"select_post_{r['media_type']}_{r['id']}")])
     await processing_msg.edit_text("**👇 ফলাফল থেকে বেছে নিন:**", reply_markup=InlineKeyboardMarkup(buttons))
 
-# 🔴🔴🔴 FIXED HERE 🔴🔴🔴
-# The filter `~filters.command()` caused a TypeError because it requires arguments.
-# It's also unnecessary because Pyrogram checks handlers in order.
-# Any command will be caught by the command handlers defined above this one.
-# So, we can safely remove it.
 @bot.on_message(filters.text & filters.private)
 @force_subscribe
 async def conversation_handler(client, message: Message):

@@ -352,8 +352,12 @@ async def search_commands(client, message: Message):
         buttons.append([InlineKeyboardButton(f"{media_icon} {title} ({year})", callback_data=f"select_post_{r['media_type']}_{r['id']}")])
     await processing_msg.edit_text("**👇 ফলাফল থেকে বেছে নিন:**", reply_markup=InlineKeyboardMarkup(buttons))
 
-# 🔄 MODIFIED: Integrated link shortening
-@bot.on_message(filters.text & filters.private & ~filters.command())
+# 🔴🔴🔴 FIXED HERE 🔴🔴🔴
+# The filter `~filters.command()` caused a TypeError because it requires arguments.
+# It's also unnecessary because Pyrogram checks handlers in order.
+# Any command will be caught by the command handlers defined above this one.
+# So, we can safely remove it.
+@bot.on_message(filters.text & filters.private)
 @force_subscribe
 async def conversation_handler(client, message: Message):
     uid, text = message.from_user.id, message.text.strip()

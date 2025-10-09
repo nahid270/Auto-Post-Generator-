@@ -26,7 +26,7 @@ TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 FORCE_SUB_CHANNEL = os.getenv("FORCE_SUB_CHANNEL")
 INVITE_LINK = os.getenv("INVITE_LINK")
 
-# ⭐️ NEW: Setup basic logging
+# ⭐️ Setup basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -151,7 +151,7 @@ def watermark_poster(poster_url: str, watermark_text: str):
     except requests.exceptions.RequestException as e: return None, f"Network Error: {e}"
     except Exception as e: return None, f"Image processing error. Error: {e}"
 
-# ⭐️ UPDATED TEMPLATE SYSTEM ⭐️
+# ⭐️ FINAL TEMPLATE SYSTEM (WITH TUTORIAL LINK) ⭐️
 async def generate_channel_caption(data: dict, language: str, links: dict, user_data: dict):
     info = {
         "title": data.get("title") or data.get("name") or "N/A",
@@ -177,14 +177,20 @@ async def generate_channel_caption(data: dict, language: str, links: dict, user_
 👇  ℍ𝕚𝕘𝕙 𝕊𝕡𝕖𝕖𝕕 | ℕ𝕠 𝔹𝕦𝕗𝕗𝕖𝕣𝕚𝕟𝕘  👇"""
     
     download_links = ""
+    # For TV Series
     if 'first_air_date' in data and links:
         sorted_seasons = sorted(links.keys(), key=lambda x: int(x))
+        season_links = []
         for season_num in sorted_seasons:
-            download_links += f"✅ **[Download Season {season_num}]({links[season_num]})**\n"
+            season_links.append(f"✅ [Download Season {season_num}]({links[season_num]})")
+        download_links = "\n".join(season_links)
+    # For Movies
     else:
-        if info['link_480p']: download_links += f"⭕️ [𝟰𝟴𝟬𝗽]({info['link_480p']})\n"
-        if info['link_720p']: download_links += f"⭕️ [𝟳𝟮𝟬𝗽]({info['link_720p']})\n"
-        if info['link_1080p']: download_links += f"⭕️ [𝟭𝟬𝟴𝟬𝗽]({info['link_1080p']})\n"
+        movie_links = []
+        if info['link_480p']: movie_links.append(f"[Download 480p]({info['link_480p']})")
+        if info['link_720p']: movie_links.append(f"[Download 720p]({info['link_720p']})")
+        if info['link_1080p']: movie_links.append(f"[Download 1080p]({info['link_1080p']})")
+        download_links = "\n\n".join(movie_links)
 
     static_footer = """Movie ReQuest Group 
 👇👇👇
@@ -194,9 +200,13 @@ Premium Backup Group link 👇👇👇
 https://t.me/+GL_XAS4MsJg4ODM1"""
 
     caption_parts = [caption_header, download_section_header]
-    if download_links: caption_parts.append(download_links.strip())
+    if download_links:
+        caption_parts.append(download_links.strip())
+    
     if user_data and user_data.get('tutorial_link'):
-        caption_parts.append(f"🎥 **How To Download:** [Watch Tutorial]({user_data['tutorial_link']})")
+        tutorial_text = f"🎥 **How To Download:** [Watch Tutorial]({user_data['tutorial_link']})"
+        caption_parts.append(tutorial_text)
+    
     caption_parts.append(static_footer)
     
     return "\n\n".join(caption_parts)
@@ -279,7 +289,7 @@ async def settings_commands(client, message: Message):
             
         await message.reply_text(settings_text)
 
-# ⭐️ NEW: Multi-Channel Management Commands ⭐️
+# ⭐️ Multi-Channel Management Commands ⭐️
 @bot.on_message(filters.command(["addchannel", "delchannel", "mychannels"]) & filters.private)
 @force_subscribe
 async def channel_management(client, message: Message):
@@ -339,7 +349,6 @@ async def generate_final_post_preview(client, uid, cid, msg):
     saved_channels = user_data.get('channel_ids', [])
     if saved_channels:
         buttons = []
-        # Create a button for each saved channel
         for channel in saved_channels:
             buttons.append([InlineKeyboardButton(f"📢 Post to {channel}", callback_data=f"postto_{channel}")])
         

@@ -26,8 +26,6 @@ API_HASH = os.getenv("API_HASH")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 FORCE_SUB_CHANNEL = os.getenv("FORCE_SUB_CHANNEL")
 INVITE_LINK = os.getenv("INVITE_LINK")
-JOIN_CHANNEL_TEXT = "🎬 সকল মুভি এবং সিরিজের আপডেট পেতে"
-JOIN_CHANNEL_LINK = "https://t.me/+60goZWp-FpkxNzVl" # আপনার চ্যানেলের লিংক দিন
 
 # ⭐️ NEW: Setup basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -69,7 +67,7 @@ def force_subscribe(func):
                 await client.get_chat_member(chat_id, message.from_user.id)
             except UserNotParticipant:
                 join_link = INVITE_LINK or f"https://t.me/{FORCE_SUB_CHANNEL.replace('@', '')}"
-                return await message.reply_text("❗ **এই বট ব্যবহার করতে আমাদের চ্যানেলে যোগ দিন।**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👉 চ্যানেলে যোগ দিন", url=join_link)]]))
+                return await message.reply_text("❗ **You must join our channel to use this bot.**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👉 Join Channel", url=join_link)]]))
         await func(client, message)
     return wrapper
 
@@ -155,7 +153,7 @@ def watermark_poster(poster_url: str, watermark_text: str):
     except requests.exceptions.RequestException as e: return None, f"Network Error: {e}"
     except Exception as e: return None, f"Image processing error. Error: {e}"
 
-# ⭐️ NEW: TEMPLATE MANAGEMENT SYSTEM ⭐️
+# ⭐️ UPDATED TEMPLATE SYSTEM ⭐️
 async def generate_channel_caption(data: dict, language: str, links: dict, user_data: dict):
     # --- Prepare all the dynamic data ---
     info = {
@@ -163,162 +161,80 @@ async def generate_channel_caption(data: dict, language: str, links: dict, user_
         "year": (data.get("release_date") or data.get("first_air_date") or "----")[:4],
         "genres": ", ".join([g["name"] for g in data.get("genres", [])[:3]]) or "N/A",
         "rating": f"{data.get('vote_average', 0):.1f}",
-        "overview": data.get("overview", "কাহিনী সংক্ষেপ পাওয়া যায়নি।"),
         "language": language,
         "runtime": format_runtime(data.get("runtime", 0) if 'runtime' in data else (data.get("episode_run_time") or [0])[0]),
         "link_480p": links.get('480p', ''),
         "link_720p": links.get('720p', ''),
         "link_1080p": links.get('1080p', ''),
     }
-    if len(info['overview']) > 150:
-        info['overview'] = info['overview'][:150] + "..."
 
-    # --- Fetch user's chosen template ---
-    template_id = user_data.get('template_id', 1) # Default to template 1 if not set
+    # Part 1: Title and Basic Info (in English)
+    caption_header = f"""🎬 **{info['title']} ({info['year']})**
+━━━━━━━━━━━━━━━━━━━━━━━
+⭐ **Rating:** {info['rating']}/10
+🎭 **Genre:** {info['genres']}
+🔊 **Language:** {info['language']}
+⏰ **Runtime:** {info['runtime']}
+━━━━━━━━━━━━━━━━━━━━━━━"""
 
-    # --- Define all templates ---
-    templates = {
-        1: """🎬 𝗠𝗢𝗩𝗜𝗘: **{title} ({year})**  
-━━━━━━━━━━━━━━━━━━━━━━━  
-✨ **Overview:**  
-{overview}
-
-🎞 **Details:**  
-⭐ **Rating:** {rating}/10  
-🎭 **Genre:** {genres}
-🔊 **Language:** {language}
-⏰ **Runtime:** {runtime}
-
-📥 **Download Now:**  
-🎬 [🔹 480p (400MB)]({link_480p})
-🎬 [🔸 720p (900MB)]({link_720p})
-🎬 [💠 1080p (1.8GB)]({link_1080p})
-━━━━━━━━━━━━━━━━━━━━━━━  
-🎯 *Watch. Feel. Experience.*""",
-
-        2: """╔═══ 🎬 **{title} ({year})** ═══╗  
-║ 📜 **Storyline:** {overview}
-║━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  
-║ ⭐ **IMDB:** {rating}/10  
-║ 🎭 **Genre:** {genres}
-║ 🔊 **Lang:** {language}
-║ ⏰ **Runtime:** {runtime}
-║━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  
-║ 🎞️ **Choose Your Quality:**  
-║ 🔹 [480p 🔽]({link_480p})
-║ 🔸 [720p 🔽]({link_720p})
-║ 💎 [1080p 🔽]({link_1080p})
-╚══════════════════════════════╝  
-🎬 *Stream it before it’s gone!*""",
-
-        3: """💫 **🎬 MOVIE:** {title} ({year})
-───────────────────────────────  
-🧠 **Plot:** {overview}
-
-📘 **Info:**  
-⭐ Rating: {rating}/10  
-🎭 Genre: {genres}
-🔊 Language: {language}
-⏰ Duration: {runtime}
-
-💾 **Download Options:**  
-⚡ [▶️ 480p (Small)]({link_480p})
-💠 [▶️ 720p (HD)]({link_720p})
-🔥 [▶️ 1080p (Full HD)]({link_1080p})
-───────────────────────────────  
-🌐 *Visit our site for more epic releases!*""",
-
-        4: """🎥 **Cinematic: {title} ({year})**
-━━━━━━━━━━━━━━━━━━━━━━━  
-📖 *{overview}*
-
-🎯 **Quick Info:**  
-⭐ IMDB: {rating}/10  
-🎭 Genre: {genres}
-🔊 Language: {language}
-⏰ Runtime: {runtime}
-
-💎 **HD DOWNLOAD LINKS**  
-🔹 [480p SD]({link_480p})
-🔸 [720p HD]({link_720p})
-💠 [1080p FHD]({link_1080p})
-
-📢 *For more latest movies, follow our channel!*""",
-
-        5: """🎬 **{title} ({year})**
-━━━━━━━━━━━━━━━  
-💥 **Storyline:** {overview}
-
-🎞 **Movie Info:**  
-⭐ {rating}/10 | 🎭 {genres} | 🔊 {language} | ⏰ {runtime}
-
-📥 **Download Below:**  
-🎦 [480p 🎬]({link_480p})
-🎦 [720p 🎬]({link_720p})
-🎦 [1080p 🎬]({link_1080p})
-
-🔔 *Watch in HD only on our site!*""",
-
-        6: """🎬 **{title} ({year})**
-───────────────────────────────  
-📜 **Synopsis:** {overview}
-
-📊 **Movie Info:**  
-⭐ Rating: {rating}/10  
-🎭 Genres: {genres}
-🔊 Language: {language}
-⏰ Runtime: {runtime}
-
-📦 **Download Servers:**  
-🩵 [480p 🔹]({link_480p})
-💙 [720p 🔸]({link_720p})
-💜 [1080p 💠]({link_1080p})
-───────────────────────────────  
-🌟 *Enjoy Ad-Free HD Movies Anytime!*"""
-    }
-
-    # --- Select and format the chosen template ---
-    caption = templates.get(template_id, templates[1]).format(**info)
+    # Part 2: Download Section (handles both Movie and TV Series)
+    download_section_header = """👀 𝗪𝗔𝗧𝗖𝗛 𝗢𝗡𝗟𝗜𝗡𝗘/📤𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗
+👇  ℍ𝕚𝕘𝕙 𝕊𝕡𝕖𝕖𝕕 | ℕ𝕠 𝔹𝕦𝕗𝕗𝕖𝕣𝕚𝕟𝕘  👇"""
     
-    # Handle TV Series links separately
+    download_links = ""
+    # For TV Series
     if 'first_air_date' in data and links:
-        link_section = "\n📥 **ডাউনলোড লিংকসমূহ** 📥\n"
-        sorted_seasons = sorted(links.keys(), key=int)
+        sorted_seasons = sorted(links.keys(), key=lambda x: int(x))
         for season_num in sorted_seasons:
-            link_section += f"✅ **[সিজন {season_num} ডাউনলোড করুন]({links[season_num]})**\n"
-        # Replace the movie download section with the series one
-        caption = re.sub(r'📥.*?(\n[^\n]*?http[s]?://[^\s]+)+', link_section.strip(), caption, flags=re.DOTALL)
+            download_links += f"✅ **[Download Season {season_num}]({links[season_num]})**\n"
+    # For Movies
+    else:
+        if info['link_480p']:
+            download_links += f"⭕️ [𝟰𝟴𝟬𝗽]({info['link_480p']})\n"
+        if info['link_720p']:
+            download_links += f"⭕️ [𝟳𝟮𝟬𝗽]({info['link_720p']})\n"
+        if info['link_1080p']:
+            download_links += f"⭕️ [𝟭𝟬𝟴𝟬𝗽]({info['link_1080p']})\n"
 
+    # Part 3: Static Footer
+    static_footer = """Movie ReQuest Group 
+👇👇👇
+https://t.me/Terabox_search_group
 
-    # --- Add optional footer ---
+Premium Backup Group link 👇👇👇
+https://t.me/+GL_XAS4MsJg4ODM1"""
+
+    # --- Combine all parts to create the final caption ---
+    caption_parts = [caption_header, download_section_header]
+    if download_links:
+        caption_parts.append(download_links.strip())
+    
     if user_data and user_data.get('tutorial_link'):
-        caption += f"\n\n🎥 **কিভাবে ডাউনলোড করবেন:** [টিউটোরিয়াল দেখুন]({user_data['tutorial_link']})"
+        caption_parts.append(f"🎥 **How To Download:** [Watch Tutorial]({user_data['tutorial_link']})")
 
-    if JOIN_CHANNEL_TEXT and JOIN_CHANNEL_LINK:
-        caption += f"\n\n**আমাদের অন্য চ্যানেলে যোগ দিন 👇**\n[👉 {JOIN_CHANNEL_TEXT}]({JOIN_CHANNEL_LINK})"
-        
+    caption_parts.append(static_footer)
+    
+    caption = "\n\n".join(caption_parts)
     return caption
-
 
 # ---- 4. BOT HANDLERS ----
 @bot.on_message(filters.command("start") & filters.private)
 @force_subscribe
 async def start_cmd(client, message: Message):
     await add_user_to_db(message.from_user)
-    await message.reply_text(f"👋 **স্বাগতম, {message.from_user.first_name}! আমি মুভি ও সিরিজ পোস্ট জেনারেটর বট।**\n\n"
-        "**আমার কমান্ডগুলো হলো:**\n"
-        "🔹 `/post <name>` - মুভি বা সিরিজের জন্য পোস্ট তৈরি করুন।\n"
-        "🔹 `/cancel` - যেকোনো চলমান প্রক্রিয়া বাতিল করুন।\n\n"
-        "**সেটিংস:**\n"
-        "🔹 `/settings` - আপনার বর্তমান সেটিংস দেখুন।\n"
-        "🔹 `/setchannel <ID>` - পোস্ট করার জন্য চ্যানেল আইডি সেট করুন।\n"
-        "🔹 `/setwatermark <text>` - পোস্টারে ওয়াটারমার্ক সেট করুন।\n"
-        "🔹 `/settemplate` - পোস্টের ডিজাইন বা টেমপ্লেট পরিবর্তন করুন।\n"
-        "🔹 `/setapi <API_KEY>` - আপনার লিঙ্ক শর্টনারের API Key সেট করুন।\n"
-        "🔹 `/setdomain <URL>` - আপনার শর্টনার ডোমেইন সেট করুন (e.g., yoursite.com)।\n"
-        "🔹 `/settutorial <link>` - ডাউনলোড টিউটোরিয়াল লিঙ্ক সেট করুন।")
+    await message.reply_text(f"👋 **Welcome, {message.from_user.first_name}! I'm a Movie & Series Post Generator Bot.**\n\n"
+        "**Available Commands:**\n"
+        "🔹 `/post <name>` - Create a post for a movie or series.\n"
+        "🔹 `/cancel` - Cancel any ongoing process.\n\n"
+        "**Settings:**\n"
+        "🔹 `/settings` - View your current settings.\n"
+        "🔹 `/setchannel <ID>` - Set the channel ID for posting.\n"
+        "🔹 `/setwatermark <text>` - Set a watermark for posters.\n"
+        "🔹 `/setapi <API_KEY>` - Set your link shortener API Key.\n"
+        "🔹 `/setdomain <URL>` - Set your shortener domain (e.g., yoursite.com).\n"
+        "🔹 `/settutorial <link>` - Set the download tutorial link.")
 
-@bot.on_message(filters.command(["setwatermark", "setchannel", "cancel", "setapi", "setdomain", "settutorial", "settings", "settemplate"]) & filters.private)
+@bot.on_message(filters.command(["setwatermark", "setchannel", "cancel", "setapi", "setdomain", "settutorial", "settings"]) & filters.private)
 @force_subscribe
 async def settings_commands(client, message: Message):
     command = message.command[0].lower()
@@ -328,78 +244,67 @@ async def settings_commands(client, message: Message):
     if command == "setwatermark":
         text = " ".join(message.command[1:]) if len(message.command) > 1 else None
         await users_collection.update_one({'_id': uid}, {'$set': {'watermark_text': text}}, upsert=True)
-        await message.reply_text(f"✅ ওয়াটারমার্ক {'সেট হয়েছে: `' + text + '`' if text else 'মুছে ফেলা হয়েছে।'}")
+        await message.reply_text(f"✅ Watermark has been {'set to: `' + text + '`' if text else 'removed.'}")
     
     elif command == "setchannel":
         if len(message.command) > 1 and message.command[1].startswith("-100") and message.command[1][1:].isdigit():
             cid = message.command[1]
             await users_collection.update_one({'_id': uid}, {'$set': {'channel_id': cid}}, upsert=True)
-            await message.reply_text(f"✅ চ্যানেল সেট হয়েছে: `{cid}`")
+            await message.reply_text(f"✅ Channel has been set: `{cid}`")
         else:
-            await message.reply_text("⚠️ অবৈধ চ্যানেল আইডি। আইডি অবশ্যই `-100` দিয়ে শুরু হতে হবে।\n**ব্যবহার:** `/setchannel -100...`")
+            await message.reply_text("⚠️ Invalid Channel ID. It must start with `-100`.\n**Usage:** `/setchannel -100...`")
             
     elif command == "cancel":
         if uid in user_conversations:
             del user_conversations[uid]
-            await message.reply_text("✅ প্রক্রিয়া বাতিল করা হয়েছে।")
+            await message.reply_text("✅ Process cancelled.")
         else:
-            await message.reply_text("🚫 বাতিল করার মতো কোনো প্রক্রিয়া চালু নেই।")
+            await message.reply_text("🚫 No active process to cancel.")
 
     elif command == "setapi":
         if len(message.command) > 1:
             api_key = message.command[1]
             await users_collection.update_one({'_id': uid}, {'$set': {'shortener_api': api_key}}, upsert=True)
-            await message.reply_text(f"✅ শর্টনার API Key সেট হয়েছে: `{api_key}`")
+            await message.reply_text(f"✅ Shortener API Key has been set: `{api_key}`")
         else:
-            await message.reply_text("⚠️ ভুল ফরম্যাট!\n**ব্যবহার:** `/setapi <আপনার_API_KEY>`")
+            await message.reply_text("⚠️ Incorrect format!\n**Usage:** `/setapi <YOUR_API_KEY>`")
 
     elif command == "setdomain":
         if len(message.command) > 1:
             domain = message.command[1]
             await users_collection.update_one({'_id': uid}, {'$set': {'shortener_url': domain}}, upsert=True)
-            await message.reply_text(f"✅ শর্টনার ডোমেইন সেট হয়েছে: `{domain}`")
+            await message.reply_text(f"✅ Shortener domain has been set: `{domain}`")
         else:
-            await message.reply_text("⚠️ ভুল ফরম্যাট!\n**ব্যবহার:** `/setdomain yourshortener.com` (http:// বা https:// ছাড়া)।")
+            await message.reply_text("⚠️ Incorrect format!\n**Usage:** `/setdomain yourshortener.com` (without http:// or https://).")
 
     elif command == "settutorial":
         if len(message.command) > 1:
             link = message.command[1]
             await users_collection.update_one({'_id': uid}, {'$set': {'tutorial_link': link}}, upsert=True)
-            await message.reply_text(f"✅ টিউটোরিয়াল লিঙ্ক সেট হয়েছে: {link}")
+            await message.reply_text(f"✅ Tutorial link has been set: {link}")
         else:
             await users_collection.update_one({'_id': uid}, {'$unset': {'tutorial_link': ""}})
-            await message.reply_text("✅ টিউটোরিয়াল লিঙ্ক মুছে ফেলা হয়েছে।")
+            await message.reply_text("✅ Tutorial link removed.")
 
     elif command == "settings":
         user_data = await users_collection.find_one({'_id': uid})
         if not user_data:
-            return await message.reply_text("আপনার কোনো সেটিংস সেভ করা নেই।")
+            return await message.reply_text("You haven't saved any settings yet.")
         
-        template_id = user_data.get('template_id', '1 (Default)')
-        settings_text = "**⚙️ আপনার বর্তমান সেটিংস:**\n\n"
-        settings_text += f"**চ্যানেল আইডি:** `{user_data.get('channel_id', 'সেট করা নেই')}`\n"
-        settings_text += f"**ওয়াটারমার্ক:** `{user_data.get('watermark_text', 'সেট করা নেই')}`\n"
-        settings_text += f"**পোস্ট টেমপ্লেট:** `ডিজাইন #{template_id}`\n"
-        settings_text += f"**টিউটোরিয়াল লিঙ্ক:** `{user_data.get('tutorial_link', 'সেট করা নেই')}`\n"
+        settings_text = "**⚙️ Your Current Settings:**\n\n"
+        settings_text += f"**Channel ID:** `{user_data.get('channel_id', 'Not Set')}`\n"
+        settings_text += f"**Watermark:** `{user_data.get('watermark_text', 'Not Set')}`\n"
+        settings_text += f"**Tutorial Link:** `{user_data.get('tutorial_link', 'Not Set')}`\n"
         
         shortener_api = user_data.get('shortener_api')
         shortener_url = user_data.get('shortener_url')
         if shortener_api and shortener_url:
-            settings_text += f"**শর্টনার API:** `{shortener_api}`\n"
-            settings_text += f"**শর্টনার URL:** `{shortener_url}`\n"
+            settings_text += f"**Shortener API:** `{shortener_api}`\n"
+            settings_text += f"**Shortener URL:** `{shortener_url}`\n"
         else:
-            settings_text += "**শর্টনার:** `সেট করা নেই`\n"
+            settings_text += "**Shortener:** `Not Set`\n"
             
         await message.reply_text(settings_text)
-
-    # ⭐️ NEW: Template selection command
-    elif command == "settemplate":
-        buttons = [
-            [InlineKeyboardButton("ডিজাইন ১", callback_data="settemplate_1"), InlineKeyboardButton("ডিজাইন ২", callback_data="settemplate_2")],
-            [InlineKeyboardButton("ডিজাইন ৩", callback_data="settemplate_3"), InlineKeyboardButton("ডিজাইন ৪", callback_data="settemplate_4")],
-            [InlineKeyboardButton("ডিজাইন ৫", callback_data="settemplate_5"), InlineKeyboardButton("ডিজাইন ৬", callback_data="settemplate_6")]
-        ]
-        await message.reply_text("🎨 **আপনার পছন্দের পোস্ট ডিজাইন বেছে নিন:**", reply_markup=InlineKeyboardMarkup(buttons))
 
 async def generate_final_post_preview(client, uid, cid, msg):
     convo = user_conversations.get(uid)
@@ -412,12 +317,12 @@ async def generate_final_post_preview(client, uid, cid, msg):
     watermark = user_data.get('watermark_text') if user_data else None
     poster_url = f"https://image.tmdb.org/t/p/w500{convo['details']['poster_path']}" if convo['details'].get('poster_path') else None
     
-    await msg.edit_text("🖼️ পোস্টার তৈরি এবং ওয়াটারমার্ক যোগ করা হচ্ছে...")
+    await msg.edit_text("🖼️ Creating poster and adding watermark...")
     poster, error = watermark_poster(poster_url, watermark)
     
     await msg.delete()
     if error:
-        await client.send_message(cid, f"⚠️ **পোস্টার তৈরিতে সমস্যা:** `{error}`")
+        await client.send_message(cid, f"⚠️ **Error creating poster:** `{error}`")
 
     poster_buffer = None
     if poster:
@@ -431,27 +336,27 @@ async def generate_final_post_preview(client, uid, cid, msg):
 
     channel_id = user_data.get('channel_id') if user_data else None
     if channel_id:
-        await client.send_message(cid, "**👆 এটি একটি প্রিভিউ।**\nআপনার চ্যানেলে পোস্ট করবেন?",
+        await client.send_message(cid, "**👆 This is a preview.**\nDo you want to post this to your channel?",
             reply_to_message_id=preview_msg.id,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 হ্যাঁ, চ্যানেলে পোস্ট করুন", callback_data=f"finalpost_{uid}")]]))
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 Yes, post to channel", callback_data=f"finalpost_{uid}")]]))
 
 @bot.on_message(filters.command("post") & filters.private)
 @force_subscribe
 async def search_commands(client, message: Message):
     if len(message.command) == 1:
-        return await message.reply_text("**ব্যবহার:** `/post Movie or Series Name`")
+        return await message.reply_text("**Usage:** `/post Movie or Series Name`")
     query = " ".join(message.command[1:])
-    processing_msg = await message.reply_text(f"🔍 `{query}`-এর জন্য খোঁজা হচ্ছে...")
+    processing_msg = await message.reply_text(f"🔍 Searching for `{query}`...")
     results = search_tmdb(query)
     if not results:
-        return await processing_msg.edit_text("❌ কোনো ফলাফল পাওয়া যায়নি।")
+        return await processing_msg.edit_text("❌ No results found.")
     buttons = []
     for r in results:
         media_icon = '🎬' if r['media_type'] == 'movie' else '📺'
         title = r.get('title') or r.get('name')
         year = (r.get('release_date') or r.get('first_air_date') or '----').split('-')[0]
         buttons.append([InlineKeyboardButton(f"{media_icon} {title} ({year})", callback_data=f"select_post_{r['media_type']}_{r['id']}")])
-    await processing_msg.edit_text("**👇 ফলাফল থেকে বেছে নিন:**", reply_markup=InlineKeyboardMarkup(buttons))
+    await processing_msg.edit_text("**👇 Choose from the results:**", reply_markup=InlineKeyboardMarkup(buttons))
 
 @bot.on_message(filters.text & filters.private)
 @force_subscribe
@@ -466,50 +371,50 @@ async def conversation_handler(client, message: Message):
     async def process_link(quality, next_state, next_prompt):
         nonlocal processing_msg
         if text.lower() != 'skip':
-            processing_msg = await message.reply("🔗 লিঙ্কটি শর্ট করা হচ্ছে...", quote=True)
+            processing_msg = await message.reply("🔗 Shortening link...", quote=True)
             shortened = await shorten_link(uid, text)
             convo["links"][quality] = shortened
         convo["state"] = next_state
-        prompt = f"✅ লিঙ্ক {'শর্ট এবং যোগ করা হয়েছে' if text.lower() != 'skip' else 'স্কিপ করা হয়েছে'}। এখন {next_prompt}"
+        prompt = f"✅ Link {'shortened and added' if text.lower() != 'skip' else 'skipped'}. Now, {next_prompt}"
         if processing_msg: await processing_msg.edit_text(prompt)
         else: await message.reply_text(prompt)
 
     if state == "wait_movie_lang":
         convo["language"] = text; convo["state"] = "wait_480p"
-        await message.reply_text("✅ ভাষা সেট হয়েছে। এখন **480p** লিংক পাঠান অথবা `skip` লিখুন।")
+        await message.reply_text("✅ Language set. Now send the **480p** link or type `skip`.")
     elif state == "wait_480p":
-        await process_link("480p", "wait_720p", "**720p** লিংক পাঠান অথবা `skip` লিখুন।")
+        await process_link("480p", "wait_720p", "send the **720p** link or type `skip`.")
     elif state == "wait_720p":
-        await process_link("720p", "wait_1080p", "**1080p** লিংক পাঠান অথবা `skip` লিখুন।")
+        await process_link("720p", "wait_1080p", "send the **1080p** link or type `skip`.")
     elif state == "wait_1080p":
         if text.lower() != 'skip':
-            processing_msg = await message.reply("🔗 লিঙ্কটি শর্ট করা হচ্ছে...", quote=True)
+            processing_msg = await message.reply("🔗 Shortening link...", quote=True)
             shortened = await shorten_link(uid, text)
             convo["links"]["1080p"] = shortened
-        msg = await (processing_msg.edit_text if processing_msg else message.reply)("✅ তথ্য সংগ্রহ সম্পন্ন! প্রিভিউ তৈরি করা হচ্ছে...")
+        msg = await (processing_msg.edit_text if processing_msg else message.reply)("✅ Data collection complete! Generating preview...")
         await generate_final_post_preview(client, uid, message.chat.id, msg)
 
     elif state == "wait_tv_lang":
         convo["language"] = text; convo["state"] = "wait_season_number"
-        await message.reply_text("✅ ভাষা সেট হয়েছে। এখন সিজনের নম্বর লিখুন (যেমন: 1, 2)।")
+        await message.reply_text("✅ Language set. Now enter the season number (e.g., 1, 2).")
     elif state == "wait_season_number":
         if text.lower() == 'done':
-            if not convo.get('seasons'): return await message.reply_text("⚠️ আপনি কোনো সিজনের লিংক যোগ করেননি।")
-            msg = await message.reply_text("✅ সকল সিজনের তথ্য সংগ্রহ সম্পন্ন! প্রিভিউ তৈরি করা হচ্ছে...", quote=True)
+            if not convo.get('seasons'): return await message.reply_text("⚠️ You haven't added any season links.")
+            msg = await message.reply_text("✅ All season data collected! Generating preview...", quote=True)
             convo['links'] = convo['seasons']
             await generate_final_post_preview(client, uid, message.chat.id, msg)
             return
-        if not text.isdigit() or int(text) <= 0: return await message.reply_text("❌ ভুল নম্বর। দয়া করে একটি সঠিক সিজন নম্বর দিন।")
+        if not text.isdigit() or int(text) <= 0: return await message.reply_text("❌ Invalid number. Please enter a valid season number.")
         convo['current_season'] = text
         convo['state'] = 'wait_season_link'
-        await message.reply_text(f"👍 ঠিক আছে। এখন **সিজন {text}**-এর ডাউনলোড লিংক পাঠান।")
+        await message.reply_text(f"👍 OK. Now send the download link for **Season {text}**.")
     elif state == "wait_season_link":
         season_num = convo.get('current_season')
-        processing_msg = await message.reply("🔗 লিঙ্কটি শর্ট করা হচ্ছে...", quote=True)
+        processing_msg = await message.reply("🔗 Shortening link...", quote=True)
         shortened = await shorten_link(uid, text)
         convo['seasons'][season_num] = shortened
         convo['state'] = 'wait_season_number'
-        await processing_msg.edit_text(f"✅ সিজন {season_num}-এর লিংক যোগ করা হয়েছে।\n\n**👉 পরবর্তী সিজনের নম্বর লিখুন, অথবা পোস্ট শেষ করতে `done` লিখুন।**")
+        await processing_msg.edit_text(f"✅ Link for Season {season_num} added.\n\n**👉 Enter the next season number, or type `done` to finish.**")
 
 @bot.on_callback_query(filters.regex("^select_"))
 async def selection_cb(client, cb: CallbackQuery):
@@ -520,7 +425,7 @@ async def selection_cb(client, cb: CallbackQuery):
         return await cb.message.edit_text("Invalid callback data.")
         
     details = get_tmdb_details(media_type, int(mid))
-    if not details: return await cb.message.edit_text("❌ দুঃখিত, TMDB থেকে বিস্তারিত তথ্য আনতে পারিনি।")
+    if not details: return await cb.message.edit_text("❌ Sorry, couldn't fetch details from TMDB.")
     
     uid = cb.from_user.id
     user_conversations[uid] = {"flow": flow, "details": details, "links": {}, "state": ""}
@@ -528,23 +433,10 @@ async def selection_cb(client, cb: CallbackQuery):
     if media_type == "tv":
         user_conversations[uid]["state"] = "wait_tv_lang"
         user_conversations[uid]['seasons'] = {}
-        await cb.message.edit_text("**ওয়েব সিরিজ পোস্ট:** সিরিজটির জন্য ভাষা লিখুন (যেমন: বাংলা, ইংরেজি)।")
+        await cb.message.edit_text("**Web Series Post:** Enter the language for the series (e.g., Bengali, English).")
     elif media_type == "movie":
         user_conversations[uid]["state"] = "wait_movie_lang"
-        await cb.message.edit_text("**মুভি পোস্ট:** মুভিটির জন্য ভাষা লিখুন।")
-
-# ⭐️ NEW: Callback handler for template selection
-@bot.on_callback_query(filters.regex("^settemplate_"))
-async def settemplate_cb(client, cb: CallbackQuery):
-    uid = cb.from_user.id
-    template_id = int(cb.data.split("_")[1])
-    await users_collection.update_one(
-        {'_id': uid},
-        {'$set': {'template_id': template_id}},
-        upsert=True
-    )
-    await cb.answer(f"✅ ডিজাইন #{template_id} সেট করা হয়েছে!", show_alert=True)
-    await cb.message.delete()
+        await cb.message.edit_text("**Movie Post:** Enter the language for the movie.")
 
 @bot.on_callback_query(filters.regex("^finalpost_"))
 async def post_to_channel_cb(client, cb: CallbackQuery):
@@ -553,15 +445,15 @@ async def post_to_channel_cb(client, cb: CallbackQuery):
     channel_id = user_data.get('channel_id') if user_data else None
 
     if not channel_id:
-        await cb.answer("⚠️ চ্যানেল সেট করা নেই!", show_alert=True)
-        return await cb.message.edit_text("আপনি এখনও কোনো চ্যানেল সেট করেননি। `/setchannel <ID>` কমান্ড ব্যবহার করুন।")
+        await cb.answer("⚠️ No channel set!", show_alert=True)
+        return await cb.message.edit_text("You haven't set a channel yet. Use the `/setchannel <ID>` command.")
 
     convo = user_conversations.get(uid)
     if not convo or 'final_post' not in convo:
-        await cb.answer("❌ সেশন শেষ হয়ে গেছে!", show_alert=True)
-        return await cb.message.edit_text("দুঃখিত, এই পোস্টের তথ্য আর পাওয়া যাচ্ছে না। অনুগ্রহ করে আবার শুরু করুন।")
+        await cb.answer("❌ Session expired!", show_alert=True)
+        return await cb.message.edit_text("Sorry, the data for this post is no longer available. Please start over.")
 
-    await cb.answer("⏳ পোস্ট করা হচ্ছে...", show_alert=False)
+    await cb.answer("⏳ Posting to channel...", show_alert=False)
     
     final_post = convo['final_post']
     caption = final_post['caption']
@@ -574,14 +466,14 @@ async def post_to_channel_cb(client, cb: CallbackQuery):
         else:
             await client.send_message(chat_id=int(channel_id), text=caption, parse_mode=enums.ParseMode.MARKDOWN)
         
-        await cb.message.edit_text("✅ **সফলভাবে আপনার চ্যানেলে পোস্ট করা হয়েছে!**")
+        await cb.message.edit_text("✅ **Successfully posted to your channel!**")
     except Exception as e:
         logger.error(f"Failed to post to channel {channel_id} for user {uid}. Error: {e}")
-        error_message = (f"❌ **চ্যানেলে পোস্ট করতে সমস্যা হয়েছে।**\n\n"
-                         f"**সম্ভাব্য কারণ:**\n"
-                         f"1. বট কি আপনার চ্যানেলের (`{channel_id}`) সদস্য?\n"
-                         f"2. বটের কি 'Post Messages' করার অনুমতি আছে?\n"
-                         f"3. চ্যানেল আইডি কি সঠিক?\n\n"
+        error_message = (f"❌ **Failed to post to the channel.**\n\n"
+                         f"**Possible Reasons:**\n"
+                         f"1. Is the bot a member of your channel (`{channel_id}`)?\n"
+                         f"2. Does the bot have permission to 'Post Messages'?\n"
+                         f"3. Is the channel ID correct?\n\n"
                          f"**Error:** `{e}`")
         await cb.message.edit_text(error_message)
     finally:

@@ -5,7 +5,6 @@ import os
 import io
 import re
 import requests
-import random
 from threading import Thread
 import logging
 
@@ -16,7 +15,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, 
 from pyrogram.errors import UserNotParticipant
 from flask import Flask
 from dotenv import load_dotenv
-import motor.motor_asyncio # ✨ MongoDB-র জন্য
+import motor.motor_asyncio
 
 # ---- 1. CONFIGURATION AND SETUP ----
 load_dotenv()
@@ -78,7 +77,6 @@ async def shorten_link(user_id: int, long_url: str):
 
     api_key = user_data['shortener_api']
     base_url = user_data['shortener_url']
-    
     api_url = f"https://{base_url}/api?api={api_key}&url={long_url}"
     
     try:
@@ -155,7 +153,6 @@ def watermark_poster(poster_url: str, watermark_text: str):
 
 # ⭐️ UPDATED TEMPLATE SYSTEM ⭐️
 async def generate_channel_caption(data: dict, language: str, links: dict, user_data: dict):
-    # --- Prepare all the dynamic data ---
     info = {
         "title": data.get("title") or data.get("name") or "N/A",
         "year": (data.get("release_date") or data.get("first_air_date") or "----")[:4],
@@ -168,7 +165,6 @@ async def generate_channel_caption(data: dict, language: str, links: dict, user_
         "link_1080p": links.get('1080p', ''),
     }
 
-    # Part 1: Title and Basic Info (in English)
     caption_header = f"""🎬 **{info['title']} ({info['year']})**
 ━━━━━━━━━━━━━━━━━━━━━━━
 ⭐ **Rating:** {info['rating']}/10
@@ -177,26 +173,19 @@ async def generate_channel_caption(data: dict, language: str, links: dict, user_
 ⏰ **Runtime:** {info['runtime']}
 ━━━━━━━━━━━━━━━━━━━━━━━"""
 
-    # Part 2: Download Section (handles both Movie and TV Series)
     download_section_header = """👀 𝗪𝗔𝗧𝗖𝗛 𝗢𝗡𝗟𝗜𝗡𝗘/📤𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗
 👇  ℍ𝕚𝕘𝕙 𝕊𝕡𝕖𝕖𝕕 | ℕ𝕠 𝔹𝕦𝕗𝕗𝕖𝕣𝕚𝕟𝕘  👇"""
     
     download_links = ""
-    # For TV Series
     if 'first_air_date' in data and links:
         sorted_seasons = sorted(links.keys(), key=lambda x: int(x))
         for season_num in sorted_seasons:
             download_links += f"✅ **[Download Season {season_num}]({links[season_num]})**\n"
-    # For Movies
     else:
-        if info['link_480p']:
-            download_links += f"⭕️ [𝟰𝟴𝟬𝗽]({info['link_480p']})\n"
-        if info['link_720p']:
-            download_links += f"⭕️ [𝟳𝟮𝟬𝗽]({info['link_720p']})\n"
-        if info['link_1080p']:
-            download_links += f"⭕️ [𝟭𝟬𝟴𝟬𝗽]({info['link_1080p']})\n"
+        if info['link_480p']: download_links += f"⭕️ [𝟰𝟴𝟬𝗽]({info['link_480p']})\n"
+        if info['link_720p']: download_links += f"⭕️ [𝟳𝟮𝟬𝗽]({info['link_720p']})\n"
+        if info['link_1080p']: download_links += f"⭕️ [𝟭𝟬𝟴𝟬𝗽]({info['link_1080p']})\n"
 
-    # Part 3: Static Footer
     static_footer = """Movie ReQuest Group 
 👇👇👇
 https://t.me/Terabox_search_group
@@ -204,18 +193,13 @@ https://t.me/Terabox_search_group
 Premium Backup Group link 👇👇👇
 https://t.me/+GL_XAS4MsJg4ODM1"""
 
-    # --- Combine all parts to create the final caption ---
     caption_parts = [caption_header, download_section_header]
-    if download_links:
-        caption_parts.append(download_links.strip())
-    
+    if download_links: caption_parts.append(download_links.strip())
     if user_data and user_data.get('tutorial_link'):
         caption_parts.append(f"🎥 **How To Download:** [Watch Tutorial]({user_data['tutorial_link']})")
-
     caption_parts.append(static_footer)
     
-    caption = "\n\n".join(caption_parts)
-    return caption
+    return "\n\n".join(caption_parts)
 
 # ---- 4. BOT HANDLERS ----
 @bot.on_message(filters.command("start") & filters.private)
@@ -226,15 +210,18 @@ async def start_cmd(client, message: Message):
         "**Available Commands:**\n"
         "🔹 `/post <name>` - Create a post for a movie or series.\n"
         "🔹 `/cancel` - Cancel any ongoing process.\n\n"
+        "**Channel Management:**\n"
+        "🔹 `/addchannel <ID>` - Add a new channel for posting.\n"
+        "🔹 `/delchannel <ID>` - Remove a saved channel.\n"
+        "🔹 `/mychannels` - View your list of saved channels.\n\n"
         "**Settings:**\n"
         "🔹 `/settings` - View your current settings.\n"
-        "🔹 `/setchannel <ID>` - Set the channel ID for posting.\n"
         "🔹 `/setwatermark <text>` - Set a watermark for posters.\n"
         "🔹 `/setapi <API_KEY>` - Set your link shortener API Key.\n"
-        "🔹 `/setdomain <URL>` - Set your shortener domain (e.g., yoursite.com).\n"
+        "🔹 `/setdomain <URL>` - Set your shortener domain.\n"
         "🔹 `/settutorial <link>` - Set the download tutorial link.")
 
-@bot.on_message(filters.command(["setwatermark", "setchannel", "cancel", "setapi", "setdomain", "settutorial", "settings"]) & filters.private)
+@bot.on_message(filters.command(["setwatermark", "cancel", "setapi", "setdomain", "settutorial", "settings"]) & filters.private)
 @force_subscribe
 async def settings_commands(client, message: Message):
     command = message.command[0].lower()
@@ -245,37 +232,24 @@ async def settings_commands(client, message: Message):
         text = " ".join(message.command[1:]) if len(message.command) > 1 else None
         await users_collection.update_one({'_id': uid}, {'$set': {'watermark_text': text}}, upsert=True)
         await message.reply_text(f"✅ Watermark has been {'set to: `' + text + '`' if text else 'removed.'}")
-    
-    elif command == "setchannel":
-        if len(message.command) > 1 and message.command[1].startswith("-100") and message.command[1][1:].isdigit():
-            cid = message.command[1]
-            await users_collection.update_one({'_id': uid}, {'$set': {'channel_id': cid}}, upsert=True)
-            await message.reply_text(f"✅ Channel has been set: `{cid}`")
-        else:
-            await message.reply_text("⚠️ Invalid Channel ID. It must start with `-100`.\n**Usage:** `/setchannel -100...`")
             
     elif command == "cancel":
-        if uid in user_conversations:
-            del user_conversations[uid]
-            await message.reply_text("✅ Process cancelled.")
-        else:
-            await message.reply_text("🚫 No active process to cancel.")
+        if uid in user_conversations: del user_conversations[uid]; await message.reply_text("✅ Process cancelled.")
+        else: await message.reply_text("🚫 No active process to cancel.")
 
     elif command == "setapi":
         if len(message.command) > 1:
             api_key = message.command[1]
             await users_collection.update_one({'_id': uid}, {'$set': {'shortener_api': api_key}}, upsert=True)
             await message.reply_text(f"✅ Shortener API Key has been set: `{api_key}`")
-        else:
-            await message.reply_text("⚠️ Incorrect format!\n**Usage:** `/setapi <YOUR_API_KEY>`")
+        else: await message.reply_text("⚠️ Incorrect format!\n**Usage:** `/setapi <YOUR_API_KEY>`")
 
     elif command == "setdomain":
         if len(message.command) > 1:
             domain = message.command[1]
             await users_collection.update_one({'_id': uid}, {'$set': {'shortener_url': domain}}, upsert=True)
             await message.reply_text(f"✅ Shortener domain has been set: `{domain}`")
-        else:
-            await message.reply_text("⚠️ Incorrect format!\n**Usage:** `/setdomain yourshortener.com` (without http:// or https://).")
+        else: await message.reply_text("⚠️ Incorrect format!\n**Usage:** `/setdomain yourshortener.com`")
 
     elif command == "settutorial":
         if len(message.command) > 1:
@@ -283,62 +257,98 @@ async def settings_commands(client, message: Message):
             await users_collection.update_one({'_id': uid}, {'$set': {'tutorial_link': link}}, upsert=True)
             await message.reply_text(f"✅ Tutorial link has been set: {link}")
         else:
-            await users_collection.update_one({'_id': uid}, {'$unset': {'tutorial_link': ""}})
-            await message.reply_text("✅ Tutorial link removed.")
+            await users_collection.update_one({'_id': uid}, {'$unset': {'tutorial_link': ""}}); await message.reply_text("✅ Tutorial link removed.")
 
     elif command == "settings":
         user_data = await users_collection.find_one({'_id': uid})
-        if not user_data:
-            return await message.reply_text("You haven't saved any settings yet.")
+        if not user_data: return await message.reply_text("You haven't saved any settings yet.")
         
+        channels = user_data.get('channel_ids', [])
+        channel_text = "\n".join([f"`{ch}`" for ch in channels]) if channels else "`Not Set`"
+
         settings_text = "**⚙️ Your Current Settings:**\n\n"
-        settings_text += f"**Channel ID:** `{user_data.get('channel_id', 'Not Set')}`\n"
+        settings_text += f"**Saved Channels:**\n{channel_text}\n\n"
         settings_text += f"**Watermark:** `{user_data.get('watermark_text', 'Not Set')}`\n"
         settings_text += f"**Tutorial Link:** `{user_data.get('tutorial_link', 'Not Set')}`\n"
         
         shortener_api = user_data.get('shortener_api')
         shortener_url = user_data.get('shortener_url')
         if shortener_api and shortener_url:
-            settings_text += f"**Shortener API:** `{shortener_api}`\n"
-            settings_text += f"**Shortener URL:** `{shortener_url}`\n"
-        else:
-            settings_text += "**Shortener:** `Not Set`\n"
+            settings_text += f"**Shortener API:** `{shortener_api}`\n**Shortener URL:** `{shortener_url}`\n"
+        else: settings_text += "**Shortener:** `Not Set`\n"
             
         await message.reply_text(settings_text)
+
+# ⭐️ NEW: Multi-Channel Management Commands ⭐️
+@bot.on_message(filters.command(["addchannel", "delchannel", "mychannels"]) & filters.private)
+@force_subscribe
+async def channel_management(client, message: Message):
+    command = message.command[0].lower()
+    uid = message.from_user.id
+    
+    if command == "addchannel":
+        if len(message.command) > 1 and message.command[1].startswith("-100") and message.command[1][1:].isdigit():
+            cid = message.command[1]
+            await users_collection.update_one(
+                {'_id': uid},
+                {'$addToSet': {'channel_ids': cid}},
+                upsert=True
+            )
+            await message.reply_text(f"✅ Channel `{cid}` added successfully.")
+        else: await message.reply_text("⚠️ Invalid Channel ID. It must start with `-100`.\n**Usage:** `/addchannel -100...`")
+
+    elif command == "delchannel":
+        if len(message.command) > 1 and message.command[1].startswith("-100") and message.command[1][1:].isdigit():
+            cid = message.command[1]
+            await users_collection.update_one(
+                {'_id': uid},
+                {'$pull': {'channel_ids': cid}}
+            )
+            await message.reply_text(f"✅ Channel `{cid}` removed if it existed.")
+        else: await message.reply_text("⚠️ Invalid Channel ID.\n**Usage:** `/delchannel -100...`")
+
+    elif command == "mychannels":
+        user_data = await users_collection.find_one({'_id': uid})
+        channels = user_data.get('channel_ids', [])
+        if not channels:
+            return await message.reply_text("You have no saved channels. Use `/addchannel` to add one.")
+        
+        channel_text = "📋 **Your Saved Channels:**\n\n" + "\n".join([f"🔹 `{ch}`" for ch in channels])
+        await message.reply_text(channel_text)
 
 async def generate_final_post_preview(client, uid, cid, msg):
     convo = user_conversations.get(uid)
     if not convo: return
     
     user_data = await users_collection.find_one({'_id': uid})
-    
     caption = await generate_channel_caption(convo["details"], convo["language"], convo["links"], user_data)
-    
-    watermark = user_data.get('watermark_text') if user_data else None
+    watermark = user_data.get('watermark_text')
     poster_url = f"https://image.tmdb.org/t/p/w500{convo['details']['poster_path']}" if convo['details'].get('poster_path') else None
     
     await msg.edit_text("🖼️ Creating poster and adding watermark...")
     poster, error = watermark_poster(poster_url, watermark)
     
     await msg.delete()
-    if error:
-        await client.send_message(cid, f"⚠️ **Error creating poster:** `{error}`")
+    if error: await client.send_message(cid, f"⚠️ **Error creating poster:** `{error}`")
 
-    poster_buffer = None
-    if poster:
-        poster.seek(0)
-        poster_buffer = io.BytesIO(poster.read())
-        poster.seek(0)
-
-    preview_msg = await client.send_photo(cid, photo=poster, caption=caption, parse_mode=enums.ParseMode.MARKDOWN) if poster else await client.send_message(cid, caption, parse_mode=enums.ParseMode.MARKDOWN)
+    poster_buffer = io.BytesIO(poster.read()) if poster else None
     
+    preview_msg = await client.send_photo(cid, photo=io.BytesIO(poster_buffer.getvalue()) if poster_buffer else poster, caption=caption, parse_mode=enums.ParseMode.MARKDOWN)
     user_conversations[uid]['final_post'] = {'caption': caption, 'poster': poster_buffer}
 
-    channel_id = user_data.get('channel_id') if user_data else None
-    if channel_id:
-        await client.send_message(cid, "**👆 This is a preview.**\nDo you want to post this to your channel?",
+    saved_channels = user_data.get('channel_ids', [])
+    if saved_channels:
+        buttons = []
+        # Create a button for each saved channel
+        for channel in saved_channels:
+            buttons.append([InlineKeyboardButton(f"📢 Post to {channel}", callback_data=f"postto_{channel}")])
+        
+        await client.send_message(cid, "**👆 This is a preview. Choose a channel to post to:**",
             reply_to_message_id=preview_msg.id,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 Yes, post to channel", callback_data=f"finalpost_{uid}")]]))
+            reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await client.send_message(cid, "✅ Preview generated. You have no channels saved. Use `/addchannel` to add one.",
+            reply_to_message_id=preview_msg.id)
 
 @bot.on_message(filters.command("post") & filters.private)
 @force_subscribe
@@ -350,6 +360,7 @@ async def search_commands(client, message: Message):
     results = search_tmdb(query)
     if not results:
         return await processing_msg.edit_text("❌ No results found.")
+    
     buttons = []
     for r in results:
         media_icon = '🎬' if r['media_type'] == 'movie' else '📺'
@@ -405,14 +416,13 @@ async def conversation_handler(client, message: Message):
             await generate_final_post_preview(client, uid, message.chat.id, msg)
             return
         if not text.isdigit() or int(text) <= 0: return await message.reply_text("❌ Invalid number. Please enter a valid season number.")
-        convo['current_season'] = text
-        convo['state'] = 'wait_season_link'
+        convo['current_season'] = text; convo['state'] = 'wait_season_link'
         await message.reply_text(f"👍 OK. Now send the download link for **Season {text}**.")
     elif state == "wait_season_link":
         season_num = convo.get('current_season')
         processing_msg = await message.reply("🔗 Shortening link...", quote=True)
         shortened = await shorten_link(uid, text)
-        convo['seasons'][season_num] = shortened
+        convo.setdefault('seasons', {})[season_num] = shortened
         convo['state'] = 'wait_season_number'
         await processing_msg.edit_text(f"✅ Link for Season {season_num} added.\n\n**👉 Enter the next season number, or type `done` to finish.**")
 
@@ -421,8 +431,7 @@ async def selection_cb(client, cb: CallbackQuery):
     await cb.answer("Fetching details...", show_alert=False)
     try: _, flow, media_type, mid = cb.data.split("_", 3)
     except Exception as e:
-        logger.error(f"Callback Error on split: {e}")
-        return await cb.message.edit_text("Invalid callback data.")
+        logger.error(f"Callback Error on split: {e}"); return await cb.message.edit_text("Invalid callback data.")
         
     details = get_tmdb_details(media_type, int(mid))
     if not details: return await cb.message.edit_text("❌ Sorry, couldn't fetch details from TMDB.")
@@ -432,21 +441,15 @@ async def selection_cb(client, cb: CallbackQuery):
     
     if media_type == "tv":
         user_conversations[uid]["state"] = "wait_tv_lang"
-        user_conversations[uid]['seasons'] = {}
         await cb.message.edit_text("**Web Series Post:** Enter the language for the series (e.g., Bengali, English).")
     elif media_type == "movie":
         user_conversations[uid]["state"] = "wait_movie_lang"
         await cb.message.edit_text("**Movie Post:** Enter the language for the movie.")
 
-@bot.on_callback_query(filters.regex("^finalpost_"))
+@bot.on_callback_query(filters.regex("^postto_"))
 async def post_to_channel_cb(client, cb: CallbackQuery):
     uid = cb.from_user.id
-    user_data = await users_collection.find_one({'_id': uid})
-    channel_id = user_data.get('channel_id') if user_data else None
-
-    if not channel_id:
-        await cb.answer("⚠️ No channel set!", show_alert=True)
-        return await cb.message.edit_text("You haven't set a channel yet. Use the `/setchannel <ID>` command.")
+    channel_id = cb.data.split("_")[1]
 
     convo = user_conversations.get(uid)
     if not convo or 'final_post' not in convo:
@@ -466,16 +469,10 @@ async def post_to_channel_cb(client, cb: CallbackQuery):
         else:
             await client.send_message(chat_id=int(channel_id), text=caption, parse_mode=enums.ParseMode.MARKDOWN)
         
-        await cb.message.edit_text("✅ **Successfully posted to your channel!**")
+        await cb.message.edit_text(f"✅ **Successfully posted to channel `{channel_id}`!**")
     except Exception as e:
         logger.error(f"Failed to post to channel {channel_id} for user {uid}. Error: {e}")
-        error_message = (f"❌ **Failed to post to the channel.**\n\n"
-                         f"**Possible Reasons:**\n"
-                         f"1. Is the bot a member of your channel (`{channel_id}`)?\n"
-                         f"2. Does the bot have permission to 'Post Messages'?\n"
-                         f"3. Is the channel ID correct?\n\n"
-                         f"**Error:** `{e}`")
-        await cb.message.edit_text(error_message)
+        await cb.message.edit_text(f"❌ **Failed to post to channel `{channel_id}`.**\n\n**Error:** `{e}`")
     finally:
         if uid in user_conversations:
             del user_conversations[uid]

@@ -151,7 +151,7 @@ def watermark_poster(poster_url: str, watermark_text: str):
     except requests.exceptions.RequestException as e: return None, f"Network Error: {e}"
     except Exception as e: return None, f"Image processing error. Error: {e}"
 
-# ⭐️ FINAL TEMPLATE SYSTEM (WITH TUTORIAL LINK) ⭐️
+# ⭐️ FINAL TEMPLATE SYSTEM (WITH BOLD LINKS) ⭐️
 async def generate_channel_caption(data: dict, language: str, links: dict, user_data: dict):
     info = {
         "title": data.get("title") or data.get("name") or "N/A",
@@ -177,19 +177,17 @@ async def generate_channel_caption(data: dict, language: str, links: dict, user_
 👇  ℍ𝕚𝕘𝕙 𝕊𝕡𝕖𝕖𝕕 | ℕ𝕠 𝔹𝕦𝕗𝕗𝕖𝕣𝕚𝕟𝕘  👇"""
     
     download_links = ""
-    # For TV Series
     if 'first_air_date' in data and links:
         sorted_seasons = sorted(links.keys(), key=lambda x: int(x))
         season_links = []
         for season_num in sorted_seasons:
-            season_links.append(f"✅ [Download Season {season_num}]({links[season_num]})")
+            season_links.append(f"✅ **[Download Season {season_num}]({links[season_num]})**")
         download_links = "\n".join(season_links)
-    # For Movies
     else:
         movie_links = []
-        if info['link_480p']: movie_links.append(f"[Download 480p]({info['link_480p']})")
-        if info['link_720p']: movie_links.append(f"[Download 720p]({info['link_720p']})")
-        if info['link_1080p']: movie_links.append(f"[Download 1080p]({info['link_1080p']})")
+        if info['link_480p']: movie_links.append(f"**[Download 480p]({info['link_480p']})**")
+        if info['link_720p']: movie_links.append(f"**[Download 720p]({info['link_720p']})**")
+        if info['link_1080p']: movie_links.append(f"**[Download 1080p]({info['link_1080p']})**")
         download_links = "\n\n".join(movie_links)
 
     static_footer = """Movie ReQuest Group 
@@ -200,15 +198,13 @@ Premium Backup Group link 👇👇👇
 https://t.me/+GL_XAS4MsJg4ODM1"""
 
     caption_parts = [caption_header, download_section_header]
-    if download_links:
-        caption_parts.append(download_links.strip())
+    if download_links: caption_parts.append(download_links.strip())
     
     if user_data and user_data.get('tutorial_link'):
-        tutorial_text = f"🎥 **How To Download:** [Watch Tutorial]({user_data['tutorial_link']})"
+        tutorial_text = f"🎥 **How To Download:** **[Watch Tutorial]({user_data['tutorial_link']})**"
         caption_parts.append(tutorial_text)
     
     caption_parts.append(static_footer)
-    
     return "\n\n".join(caption_parts)
 
 # ---- 4. BOT HANDLERS ----
@@ -289,7 +285,6 @@ async def settings_commands(client, message: Message):
             
         await message.reply_text(settings_text)
 
-# ⭐️ Multi-Channel Management Commands ⭐️
 @bot.on_message(filters.command(["addchannel", "delchannel", "mychannels"]) & filters.private)
 @force_subscribe
 async def channel_management(client, message: Message):
@@ -299,21 +294,14 @@ async def channel_management(client, message: Message):
     if command == "addchannel":
         if len(message.command) > 1 and message.command[1].startswith("-100") and message.command[1][1:].isdigit():
             cid = message.command[1]
-            await users_collection.update_one(
-                {'_id': uid},
-                {'$addToSet': {'channel_ids': cid}},
-                upsert=True
-            )
+            await users_collection.update_one({'_id': uid}, {'$addToSet': {'channel_ids': cid}}, upsert=True)
             await message.reply_text(f"✅ Channel `{cid}` added successfully.")
         else: await message.reply_text("⚠️ Invalid Channel ID. It must start with `-100`.\n**Usage:** `/addchannel -100...`")
 
     elif command == "delchannel":
         if len(message.command) > 1 and message.command[1].startswith("-100") and message.command[1][1:].isdigit():
             cid = message.command[1]
-            await users_collection.update_one(
-                {'_id': uid},
-                {'$pull': {'channel_ids': cid}}
-            )
+            await users_collection.update_one({'_id': uid}, {'$pull': {'channel_ids': cid}})
             await message.reply_text(f"✅ Channel `{cid}` removed if it existed.")
         else: await message.reply_text("⚠️ Invalid Channel ID.\n**Usage:** `/delchannel -100...`")
 
@@ -322,10 +310,10 @@ async def channel_management(client, message: Message):
         channels = user_data.get('channel_ids', [])
         if not channels:
             return await message.reply_text("You have no saved channels. Use `/addchannel` to add one.")
-        
         channel_text = "📋 **Your Saved Channels:**\n\n" + "\n".join([f"🔹 `{ch}`" for ch in channels])
         await message.reply_text(channel_text)
 
+# ⭐️ UPDATED FUNCTION with Channel Name Fetching ⭐️
 async def generate_final_post_preview(client, uid, cid, msg):
     convo = user_conversations.get(uid)
     if not convo: return
@@ -349,15 +337,22 @@ async def generate_final_post_preview(client, uid, cid, msg):
     saved_channels = user_data.get('channel_ids', [])
     if saved_channels:
         buttons = []
-        for channel in saved_channels:
-            buttons.append([InlineKeyboardButton(f"📢 Post to {channel}", callback_data=f"postto_{channel}")])
+        for channel_id in saved_channels:
+            try:
+                chat = await client.get_chat(int(channel_id))
+                channel_name = chat.title
+                buttons.append([InlineKeyboardButton(f"📢 Post to {channel_name}", callback_data=f"postto_{channel_id}")])
+            except Exception as e:
+                logger.warning(f"Could not get chat info for ID {channel_id}. Maybe bot was kicked? Error: {e}")
         
-        await client.send_message(cid, "**👆 This is a preview. Choose a channel to post to:**",
-            reply_to_message_id=preview_msg.id,
-            reply_markup=InlineKeyboardMarkup(buttons))
+        if buttons:
+            await client.send_message(cid, "**👆 This is a preview. Choose a channel to post to:**",
+                reply_to_message_id=preview_msg.id,
+                reply_markup=InlineKeyboardMarkup(buttons))
+        else:
+            await client.send_message(cid, "⚠️ Could not find any valid channels. Make sure the bot is a member of the channels you've added.", reply_to_message_id=preview_msg.id)
     else:
-        await client.send_message(cid, "✅ Preview generated. You have no channels saved. Use `/addchannel` to add one.",
-            reply_to_message_id=preview_msg.id)
+        await client.send_message(cid, "✅ Preview generated. You have no channels saved. Use `/addchannel` to add one.", reply_to_message_id=preview_msg.id)
 
 @bot.on_message(filters.command("post") & filters.private)
 @force_subscribe
@@ -455,6 +450,7 @@ async def selection_cb(client, cb: CallbackQuery):
         user_conversations[uid]["state"] = "wait_movie_lang"
         await cb.message.edit_text("**Movie Post:** Enter the language for the movie.")
 
+# ⭐️ UPDATED FUNCTION with Channel Name in messages ⭐️
 @bot.on_callback_query(filters.regex("^postto_"))
 async def post_to_channel_cb(client, cb: CallbackQuery):
     uid = cb.from_user.id
@@ -472,13 +468,16 @@ async def post_to_channel_cb(client, cb: CallbackQuery):
     poster = final_post['poster']
 
     try:
+        chat = await client.get_chat(int(channel_id))
+        channel_name = chat.title
+
         if poster:
             poster.seek(0)
             await client.send_photo(chat_id=int(channel_id), photo=poster, caption=caption, parse_mode=enums.ParseMode.MARKDOWN)
         else:
             await client.send_message(chat_id=int(channel_id), text=caption, parse_mode=enums.ParseMode.MARKDOWN)
         
-        await cb.message.edit_text(f"✅ **Successfully posted to channel `{channel_id}`!**")
+        await cb.message.edit_text(f"✅ **Successfully posted to channel '{channel_name}'!**")
     except Exception as e:
         logger.error(f"Failed to post to channel {channel_id} for user {uid}. Error: {e}")
         await cb.message.edit_text(f"❌ **Failed to post to channel `{channel_id}`.**\n\n**Error:** `{e}`")

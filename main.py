@@ -55,7 +55,6 @@ Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 80
 
 # ---- 2. DECORATORS AND HELPER FUNCTIONS ----
 async def add_user_to_db(user):
-    # 🔄 MODIFIED: Store user's first name for better interaction
     await users_collection.update_one(
         {'_id': user.id},
         {'$set': {'first_name': user.first_name}},
@@ -74,17 +73,14 @@ def force_subscribe(func):
         await func(client, message)
     return wrapper
 
-# ⭐️ NEW: Link Shortener Function
 async def shorten_link(user_id: int, long_url: str):
-    """Shortens a URL using the user's saved shortener settings."""
     user_data = await users_collection.find_one({'_id': user_id})
     if not user_data or 'shortener_api' not in user_data or 'shortener_url' not in user_data:
-        return long_url # Return original URL if no shortener is configured
+        return long_url 
 
     api_key = user_data['shortener_api']
     base_url = user_data['shortener_url']
     
-    # Construct the API URL. This format is common for many shorteners (e.g., Zagl, ShrinkEarn).
     api_url = f"https://{base_url}/api?api={api_key}&url={long_url}"
     
     try:
@@ -96,10 +92,10 @@ async def shorten_link(user_id: int, long_url: str):
             return data["shortenedUrl"]
         else:
             logger.warning(f"Shortener API returned an error for user {user_id}: {data.get('message', 'Unknown error')}")
-            return long_url # Return original on API error
+            return long_url
     except requests.exceptions.RequestException as e:
         logger.error(f"Failed to call shortener API for user {user_id}. Error: {e}")
-        return long_url # Return original on network error
+        return long_url
 
 def format_runtime(minutes: int):
     if not minutes or not isinstance(minutes, int): return "N/A"
@@ -159,51 +155,150 @@ def watermark_poster(poster_url: str, watermark_text: str):
     except requests.exceptions.RequestException as e: return None, f"Network Error: {e}"
     except Exception as e: return None, f"Image processing error. Error: {e}"
 
+# ⭐️ NEW: TEMPLATE MANAGEMENT SYSTEM ⭐️
 async def generate_channel_caption(data: dict, language: str, links: dict, user_data: dict):
-    title = data.get("title") or data.get("name") or "N/A"
-    year = (data.get("release_date") or data.get("first_air_date") or "----")[:4]
-    genres = ", ".join([g["name"] for g in data.get("genres", [])[:3]]) or "N/A"
-    rating = f"{data.get('vote_average', 0):.1f}/10"
-    overview = data.get("overview", "কাহিনী সংক্ষেপ পাওয়া যায়নি।")
-    if len(overview) > 250: overview = overview[:250] + "..."
-    cast = ", ".join([a['name'] for a in data.get('credits', {}).get('cast', [])[:3]]) or "N/A"
+    # --- Prepare all the dynamic data ---
+    info = {
+        "title": data.get("title") or data.get("name") or "N/A",
+        "year": (data.get("release_date") or data.get("first_air_date") or "----")[:4],
+        "genres": ", ".join([g["name"] for g in data.get("genres", [])[:3]]) or "N/A",
+        "rating": f"{data.get('vote_average', 0):.1f}",
+        "overview": data.get("overview", "কাহিনী সংক্ষেপ পাওয়া যায়নি।"),
+        "language": language,
+        "runtime": format_runtime(data.get("runtime", 0) if 'runtime' in data else (data.get("episode_run_time") or [0])[0]),
+        "link_480p": links.get('480p', ''),
+        "link_720p": links.get('720p', ''),
+        "link_1080p": links.get('1080p', ''),
+    }
+    if len(info['overview']) > 150:
+        info['overview'] = info['overview'][:150] + "..."
+
+    # --- Fetch user's chosen template ---
+    template_id = user_data.get('template_id', 1) # Default to template 1 if not set
+
+    # --- Define all templates ---
+    templates = {
+        1: """🎬 𝗠𝗢𝗩𝗜𝗘: **{title} ({year})**  
+━━━━━━━━━━━━━━━━━━━━━━━  
+✨ **Overview:**  
+{overview}
+
+🎞 **Details:**  
+⭐ **Rating:** {rating}/10  
+🎭 **Genre:** {genres}
+🔊 **Language:** {language}
+⏰ **Runtime:** {runtime}
+
+📥 **Download Now:**  
+🎬 [🔹 480p (400MB)]({link_480p})
+🎬 [🔸 720p (900MB)]({link_720p})
+🎬 [💠 1080p (1.8GB)]({link_1080p})
+━━━━━━━━━━━━━━━━━━━━━━━  
+🎯 *Watch. Feel. Experience.*""",
+
+        2: """╔═══ 🎬 **{title} ({year})** ═══╗  
+║ 📜 **Storyline:** {overview}
+║━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  
+║ ⭐ **IMDB:** {rating}/10  
+║ 🎭 **Genre:** {genres}
+║ 🔊 **Lang:** {language}
+║ ⏰ **Runtime:** {runtime}
+║━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  
+║ 🎞️ **Choose Your Quality:**  
+║ 🔹 [480p 🔽]({link_480p})
+║ 🔸 [720p 🔽]({link_720p})
+║ 💎 [1080p 🔽]({link_1080p})
+╚══════════════════════════════╝  
+🎬 *Stream it before it’s gone!*""",
+
+        3: """💫 **🎬 MOVIE:** {title} ({year})
+───────────────────────────────  
+🧠 **Plot:** {overview}
+
+📘 **Info:**  
+⭐ Rating: {rating}/10  
+🎭 Genre: {genres}
+🔊 Language: {language}
+⏰ Duration: {runtime}
+
+💾 **Download Options:**  
+⚡ [▶️ 480p (Small)]({link_480p})
+💠 [▶️ 720p (HD)]({link_720p})
+🔥 [▶️ 1080p (Full HD)]({link_1080p})
+───────────────────────────────  
+🌐 *Visit our site for more epic releases!*""",
+
+        4: """🎥 **Cinematic: {title} ({year})**
+━━━━━━━━━━━━━━━━━━━━━━━  
+📖 *{overview}*
+
+🎯 **Quick Info:**  
+⭐ IMDB: {rating}/10  
+🎭 Genre: {genres}
+🔊 Language: {language}
+⏰ Runtime: {runtime}
+
+💎 **HD DOWNLOAD LINKS**  
+🔹 [480p SD]({link_480p})
+🔸 [720p HD]({link_720p})
+💠 [1080p FHD]({link_1080p})
+
+📢 *For more latest movies, follow our channel!*""",
+
+        5: """🎬 **{title} ({year})**
+━━━━━━━━━━━━━━━  
+💥 **Storyline:** {overview}
+
+🎞 **Movie Info:**  
+⭐ {rating}/10 | 🎭 {genres} | 🔊 {language} | ⏰ {runtime}
+
+📥 **Download Below:**  
+🎦 [480p 🎬]({link_480p})
+🎦 [720p 🎬]({link_720p})
+🎦 [1080p 🎬]({link_1080p})
+
+🔔 *Watch in HD only on our site!*""",
+
+        6: """🎬 **{title} ({year})**
+───────────────────────────────  
+📜 **Synopsis:** {overview}
+
+📊 **Movie Info:**  
+⭐ Rating: {rating}/10  
+🎭 Genres: {genres}
+🔊 Language: {language}
+⏰ Runtime: {runtime}
+
+📦 **Download Servers:**  
+🩵 [480p 🔹]({link_480p})
+💙 [720p 🔸]({link_720p})
+💜 [1080p 💠]({link_1080p})
+───────────────────────────────  
+🌟 *Enjoy Ad-Free HD Movies Anytime!*"""
+    }
+
+    # --- Select and format the chosen template ---
+    caption = templates.get(template_id, templates[1]).format(**info)
     
-    caption_header = (f"⭐️ **রেটিং:** {rating}\n🎭 **ধরন:** {genres}\n"
-                      f"🔊 **ভাষা:** {language}\n")
+    # Handle TV Series links separately
+    if 'first_air_date' in data and links:
+        link_section = "\n📥 **ডাউনলোড লিংকসমূহ** 📥\n"
+        sorted_seasons = sorted(links.keys(), key=int)
+        for season_num in sorted_seasons:
+            link_section += f"✅ **[সিজন {season_num} ডাউনলোড করুন]({links[season_num]})**\n"
+        # Replace the movie download section with the series one
+        caption = re.sub(r'📥.*?(\n[^\n]*?http[s]?://[^\s]+)+', link_section.strip(), caption, flags=re.DOTALL)
 
-    if 'first_air_date' in data: # TV Show
-        runtime_list = data.get("episode_run_time", [])
-        runtime = format_runtime(runtime_list[0] if runtime_list else 0)
-        seasons = data.get("number_of_seasons", "N/A")
-        caption_header = (f"📺 **{title} ({year})**\n\n" + caption_header +
-                          f"📊 **মোট সিজন:** {seasons}\n"
-                          f"⏰ **প্রতি পর্বের রানটাইম:** {runtime}\n"
-                          f"👥 **অভিনয়ে:** {cast}\n\n📝 **কাহিনী সংক্ষেপ:** {overview}\n\n")
-        
-        link_section = "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n📥 **ডাউনলোড লিংকসমূহ** 📥\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        if links:
-            sorted_seasons = sorted(links.keys(), key=int)
-            for season_num in sorted_seasons:
-                link_section += f"✅ **[সিজন {season_num} ডাউনলোড করুন]({links[season_num]})**\n"
-    else: # Movie
-        runtime = format_runtime(data.get("runtime", 0))
-        caption_header = (f"🎬 **{title} ({year})**\n\n" + caption_header +
-                          f"⏰ **রানটাইম:** {runtime}\n"
-                          f"👥 **অভিনয়ে:** {cast}\n\n📝 **কাহিনী সংক্ষেপ:** {overview}\n\n")
-        
-        link_section = "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n📥 **ডাউনলোড লিংকসমূহ** 📥\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        if links.get("480p"): link_section += f"✅ **[480p কোয়ালিটি ডাউনলোড]({links['480p']})**\n"
-        if links.get("720p"): link_section += f"✅ **[720p কোয়ালিটি ডাউনলোড]({links['720p']})**\n"
-        if links.get("1080p"): link_section += f"✅ **[1080p কোয়ালিটি ডাউনলোড]({links['1080p']})**\n"
 
-    caption = caption_header + link_section
-
+    # --- Add optional footer ---
     if user_data and user_data.get('tutorial_link'):
-        caption += f"\n🎥 **কিভাবে ডাউনলোড করবেন:** [টিউটোরিয়াল দেখুন]({user_data['tutorial_link']})"
+        caption += f"\n\n🎥 **কিভাবে ডাউনলোড করবেন:** [টিউটোরিয়াল দেখুন]({user_data['tutorial_link']})"
 
     if JOIN_CHANNEL_TEXT and JOIN_CHANNEL_LINK:
-        caption += f"\n---\n**আমাদের অন্য চ্যানেলে যোগ দিন 👇**\n[👉 {JOIN_CHANNEL_TEXT}]({JOIN_CHANNEL_LINK})"
+        caption += f"\n\n**আমাদের অন্য চ্যানেলে যোগ দিন 👇**\n[👉 {JOIN_CHANNEL_TEXT}]({JOIN_CHANNEL_LINK})"
+        
     return caption
+
 
 # ---- 4. BOT HANDLERS ----
 @bot.on_message(filters.command("start") & filters.private)
@@ -218,12 +313,12 @@ async def start_cmd(client, message: Message):
         "🔹 `/settings` - আপনার বর্তমান সেটিংস দেখুন।\n"
         "🔹 `/setchannel <ID>` - পোস্ট করার জন্য চ্যানেল আইডি সেট করুন।\n"
         "🔹 `/setwatermark <text>` - পোস্টারে ওয়াটারমার্ক সেট করুন।\n"
+        "🔹 `/settemplate` - পোস্টের ডিজাইন বা টেমপ্লেট পরিবর্তন করুন।\n"
         "🔹 `/setapi <API_KEY>` - আপনার লিঙ্ক শর্টনারের API Key সেট করুন।\n"
         "🔹 `/setdomain <URL>` - আপনার শর্টনার ডোমেইন সেট করুন (e.g., yoursite.com)।\n"
         "🔹 `/settutorial <link>` - ডাউনলোড টিউটোরিয়াল লিঙ্ক সেট করুন।")
 
-# 🔄 পরিবর্তন: লিঙ্ক শর্টনার কমান্ডগুলো আলাদা করা হয়েছে এবং settings কমান্ডের সাথে যুক্ত করা হয়েছে।
-@bot.on_message(filters.command(["setwatermark", "setchannel", "cancel", "setapi", "setdomain", "settutorial", "settings"]) & filters.private)
+@bot.on_message(filters.command(["setwatermark", "setchannel", "cancel", "setapi", "setdomain", "settutorial", "settings", "settemplate"]) & filters.private)
 @force_subscribe
 async def settings_commands(client, message: Message):
     command = message.command[0].lower()
@@ -250,7 +345,6 @@ async def settings_commands(client, message: Message):
         else:
             await message.reply_text("🚫 বাতিল করার মতো কোনো প্রক্রিয়া চালু নেই।")
 
-    # ⭐️ NEW: Shortener API command handler
     elif command == "setapi":
         if len(message.command) > 1:
             api_key = message.command[1]
@@ -259,7 +353,6 @@ async def settings_commands(client, message: Message):
         else:
             await message.reply_text("⚠️ ভুল ফরম্যাট!\n**ব্যবহার:** `/setapi <আপনার_API_KEY>`")
 
-    # ⭐️ NEW: Shortener Domain command handler
     elif command == "setdomain":
         if len(message.command) > 1:
             domain = message.command[1]
@@ -268,7 +361,6 @@ async def settings_commands(client, message: Message):
         else:
             await message.reply_text("⚠️ ভুল ফরম্যাট!\n**ব্যবহার:** `/setdomain yourshortener.com` (http:// বা https:// ছাড়া)।")
 
-    # ⭐️ NEW: Tutorial command handler
     elif command == "settutorial":
         if len(message.command) > 1:
             link = message.command[1]
@@ -278,15 +370,16 @@ async def settings_commands(client, message: Message):
             await users_collection.update_one({'_id': uid}, {'$unset': {'tutorial_link': ""}})
             await message.reply_text("✅ টিউটোরিয়াল লিঙ্ক মুছে ফেলা হয়েছে।")
 
-    # ⭐️ NEW: Settings view command
     elif command == "settings":
         user_data = await users_collection.find_one({'_id': uid})
         if not user_data:
             return await message.reply_text("আপনার কোনো সেটিংস সেভ করা নেই।")
         
+        template_id = user_data.get('template_id', '1 (Default)')
         settings_text = "**⚙️ আপনার বর্তমান সেটিংস:**\n\n"
         settings_text += f"**চ্যানেল আইডি:** `{user_data.get('channel_id', 'সেট করা নেই')}`\n"
         settings_text += f"**ওয়াটারমার্ক:** `{user_data.get('watermark_text', 'সেট করা নেই')}`\n"
+        settings_text += f"**পোস্ট টেমপ্লেট:** `ডিজাইন #{template_id}`\n"
         settings_text += f"**টিউটোরিয়াল লিঙ্ক:** `{user_data.get('tutorial_link', 'সেট করা নেই')}`\n"
         
         shortener_api = user_data.get('shortener_api')
@@ -295,9 +388,18 @@ async def settings_commands(client, message: Message):
             settings_text += f"**শর্টনার API:** `{shortener_api}`\n"
             settings_text += f"**শর্টনার URL:** `{shortener_url}`\n"
         else:
-            settings_text += "**শর্টনার:** `সেট করা নেই` (API ও ডোমেইন দুটোই সেট করুন)\n"
+            settings_text += "**শর্টনার:** `সেট করা নেই`\n"
             
         await message.reply_text(settings_text)
+
+    # ⭐️ NEW: Template selection command
+    elif command == "settemplate":
+        buttons = [
+            [InlineKeyboardButton("ডিজাইন ১", callback_data="settemplate_1"), InlineKeyboardButton("ডিজাইন ২", callback_data="settemplate_2")],
+            [InlineKeyboardButton("ডিজাইন ৩", callback_data="settemplate_3"), InlineKeyboardButton("ডিজাইন ৪", callback_data="settemplate_4")],
+            [InlineKeyboardButton("ডিজাইন ৫", callback_data="settemplate_5"), InlineKeyboardButton("ডিজাইন ৬", callback_data="settemplate_6")]
+        ]
+        await message.reply_text("🎨 **আপনার পছন্দের পোস্ট ডিজাইন বেছে নিন:**", reply_markup=InlineKeyboardMarkup(buttons))
 
 async def generate_final_post_preview(client, uid, cid, msg):
     convo = user_conversations.get(uid)
@@ -430,6 +532,19 @@ async def selection_cb(client, cb: CallbackQuery):
     elif media_type == "movie":
         user_conversations[uid]["state"] = "wait_movie_lang"
         await cb.message.edit_text("**মুভি পোস্ট:** মুভিটির জন্য ভাষা লিখুন।")
+
+# ⭐️ NEW: Callback handler for template selection
+@bot.on_callback_query(filters.regex("^settemplate_"))
+async def settemplate_cb(client, cb: CallbackQuery):
+    uid = cb.from_user.id
+    template_id = int(cb.data.split("_")[1])
+    await users_collection.update_one(
+        {'_id': uid},
+        {'$set': {'template_id': template_id}},
+        upsert=True
+    )
+    await cb.answer(f"✅ ডিজাইন #{template_id} সেট করা হয়েছে!", show_alert=True)
+    await cb.message.delete()
 
 @bot.on_callback_query(filters.regex("^finalpost_"))
 async def post_to_channel_cb(client, cb: CallbackQuery):

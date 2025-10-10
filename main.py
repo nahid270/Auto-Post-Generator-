@@ -124,7 +124,7 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
         img = Image.open(io.BytesIO(img_data)).convert("RGBA")
         draw = ImageDraw.Draw(img)
 
-        # ---- Badge Text Logic (Text at the TOP) ----
+        # ---- Badge Text Logic (Text at the TOP) - [ ✨ উন্নত এবং রঙিন ✨ ] ----
         if badge_text:
             badge_font_size = int(img.width / 8)
             try:
@@ -133,22 +133,44 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
                 logger.warning("HindSiliguri-Bold.ttf not found. Using default font for badge.")
                 badge_font = ImageFont.load_default()
 
-            badge_fill = (255, 0, 0, 255)
-            badge_outline = (0, 0, 0, 255)
+            # --- গ্র্যাডিয়েন্ট এর জন্য রঙ নির্ধারণ করুন ---
+            gradient_start_color = (255, 255, 0)  # হলুদ
+            gradient_end_color = (255, 0, 0)      # লাল
+            badge_outline_color = (0, 0, 0, 255) # কালো আউটলাইন
             stroke_width = int(badge_font_size / 20) + 1
 
+            # লেখার আকার এবং অবস্থান গণনা
             bbox = draw.textbbox((0, 0), badge_text, font=badge_font)
             text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            
             x = (img.width - text_width) / 2
             y = img.height * 0.05
 
+            # ১. প্রথমে কালো আউটলাইন আঁকুন
             for i in range(-stroke_width, stroke_width + 1):
                 for j in range(-stroke_width, stroke_width + 1):
                     if i != 0 or j != 0:
-                        draw.text((x + i, y + j), badge_text, font=badge_font, fill=badge_outline)
+                        draw.text((x + i, y + j), badge_text, font=badge_font, fill=badge_outline_color)
+
+            # ২. একটি গ্র্যাডিয়েন্ট ইমেজ তৈরি করুন
+            gradient = Image.new('RGBA', (text_width, text_height), color=0)
+            gradient_draw = ImageDraw.Draw(gradient)
             
-            draw.text((x, y), badge_text, font=badge_font, fill=badge_fill)
+            for i in range(text_width):
+                # প্রতিটি পিক্সেলের জন্য রঙ গণনা
+                ratio = i / text_width
+                r = int(gradient_start_color[0] * (1 - ratio) + gradient_end_color[0] * ratio)
+                g = int(gradient_start_color[1] * (1 - ratio) + gradient_end_color[1] * ratio)
+                b = int(gradient_start_color[2] * (1 - ratio) + gradient_end_color[2] * ratio)
+                # একটি উল্লম্ব লাইন আঁকুন
+                gradient_draw.line([(i, 0), (i, text_height)], fill=(r, g, b, 255))
+            
+            # ৩. লেখার জন্য একটি মাস্ক (mask) তৈরি করুন
+            mask = Image.new('L', (text_width, text_height), 0)
+            mask_draw = ImageDraw.Draw(mask)
+            mask_draw.text((0, 0), badge_text, font=badge_font, fill=255)
+
+            # ৪. মূল ছবিতে মাস্ক ব্যবহার করে গ্র্যাডিয়েন্টটি পেস্ট করুন
+            img.paste(gradient, (int(x), int(y)), mask)
 
         # ---- Existing Watermark Logic (Unchanged) ----
         if watermark_text:

@@ -5,4 +5,5 @@ python-dotenv
 requests
 motor
 TgCrypto
-opencv-python-headless numpy
+opencv-python-headless
+numpy

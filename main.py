@@ -16,6 +16,8 @@ from pyrogram.errors import UserNotParticipant
 from flask import Flask
 from dotenv import load_dotenv
 import motor.motor_asyncio
+import numpy as np
+import cv2  # <-- নতুন লাইব্রেরি
 
 # ---- 1. CONFIGURATION AND SETUP ----
 load_dotenv()
@@ -51,6 +53,24 @@ def home(): return "✅ Bot is Running!"
 Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080))), daemon=True).start()
 
 # ---- 2. DECORATORS AND HELPER FUNCTIONS ----
+
+# Helper to download Haar Cascade file if not present
+def download_cascade():
+    cascade_file = "haarcascade_frontalface_default.xml"
+    if not os.path.exists(cascade_file):
+        logger.info(f"Downloading {cascade_file} for face detection...")
+        url = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
+        try:
+            r = requests.get(url, timeout=20)
+            r.raise_for_status()
+            with open(cascade_file, 'wb') as f:
+                f.write(r.content)
+            logger.info("Download complete.")
+        except Exception as e:
+            logger.error(f"Could not download cascade file. Face detection will be disabled. Error: {e}")
+            return None
+    return cascade_file
+
 async def add_user_to_db(user):
     await users_collection.update_one(
         {'_id': user.id},
@@ -121,72 +141,97 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
     if not poster_url: return None, "Poster URL not found."
     try:
         img_data = requests.get(poster_url, timeout=20).content
-        img = Image.open(io.BytesIO(img_data)).convert("RGBA")
+        original_img = Image.open(io.BytesIO(img_data)).convert("RGBA")
+        
+        img = Image.new("RGBA", original_img.size)
+        img.paste(original_img)
+        
         draw = ImageDraw.Draw(img)
 
-        # ---- Badge Text Logic (Text at the TOP) - [ ✨ উন্নত এবং রঙিন ✨ ] ----
+        # ---- Badge Text Logic (Text at the TOP) - [ 🤖 স্মার্ট প্লেসমেন্ট সহ 🤖 ] ----
         if badge_text:
-            badge_font_size = int(img.width / 8)
+            badge_font_size = int(img.width / 9)
             try:
                 badge_font = ImageFont.truetype("HindSiliguri-Bold.ttf", badge_font_size)
             except IOError:
                 logger.warning("HindSiliguri-Bold.ttf not found. Using default font for badge.")
                 badge_font = ImageFont.load_default()
 
-            # --- গ্র্যাডিয়েন্ট এর জন্য রঙ নির্ধারণ করুন ---
-            gradient_start_color = (255, 255, 0)  # হলুদ
-            gradient_end_color = (255, 0, 0)      # লাল
-            badge_outline_color = (0, 0, 0, 255) # কালো আউটলাইন
-            stroke_width = int(badge_font_size / 20) + 1
-
-            # লেখার আকার এবং অবস্থান গণনা
             bbox = draw.textbbox((0, 0), badge_text, font=badge_font)
             text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
             x = (img.width - text_width) / 2
-            y = img.height * 0.05
+            
+            # --- স্বয়ংক্রিয়ভাবে সেরা অবস্থান খুঁজে বের করা ---
+            y_pos = img.height * 0.03  # ডিফল্ট অবস্থান
+            
+            cascade_path = download_cascade()
+            if cascade_path:
+                try:
+                    # PIL Image থেকে OpenCV Image এ রূপান্তর
+                    cv_image = np.array(original_img.convert('RGB'))
+                    gray = cv2.cvtColor(cv_image, cv2.COLOR_RGB2GRAY)
+                    face_cascade = cv2.CascadeClassifier(cascade_path)
+                    # মুখ শনাক্তকরণ
+                    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+                    
+                    text_box_y1 = y_pos + text_height + int(badge_font_size * 0.2)
+                    is_collision = False
+                    for (fx, fy, fw, fh) in faces:
+                        # যদি টেক্সট বক্স কোনো মুখের উপর চলে আসে
+                        if y_pos < (fy + fh) and text_box_y1 > fy:
+                            is_collision = True
+                            break
+                    
+                    if is_collision:
+                        logger.info("Face detected at the top. Moving badge text lower.")
+                        # নতুন নিরাপদ অবস্থান
+                        y_pos = img.height * 0.25
+                except Exception as e:
+                    logger.error(f"Face detection failed: {e}")
 
-            # ১. প্রথমে কালো আউটলাইন আঁকুন
-            for i in range(-stroke_width, stroke_width + 1):
-                for j in range(-stroke_width, stroke_width + 1):
-                    if i != 0 or j != 0:
-                        draw.text((x + i, y + j), badge_text, font=badge_font, fill=badge_outline_color)
+            y = y_pos # চূড়ান্ত অবস্থান নির্ধারণ
 
-            # ২. একটি গ্র্যাডিয়েন্ট ইমেজ তৈরি করুন
-            gradient = Image.new('RGBA', (text_width, text_height), color=0)
+            # লেখার পিছনে স্বচ্ছ ব্যাকগ্রাউন্ড আঁকা
+            padding = int(badge_font_size * 0.1)
+            rect_layer = Image.new('RGBA', img.size, (0, 0, 0, 0))
+            rect_draw = ImageDraw.Draw(rect_layer)
+            rect_draw.rectangle(
+                (x - padding, y - padding, x + text_width + padding, y + text_height + padding), 
+                fill=(0, 0, 0, 140)
+            )
+            img = Image.alpha_composite(img, rect_layer)
+            draw = ImageDraw.Draw(img)
+
+            # গ্র্যাডিয়েন্ট টেক্সট তৈরি
+            gradient = Image.new('RGBA', (text_width, text_height), (0, 0, 0, 0))
             gradient_draw = ImageDraw.Draw(gradient)
             
+            gradient_start_color = (255, 255, 0)
+            gradient_end_color = (255, 20, 0)
             for i in range(text_width):
-                # প্রতিটি পিক্সেলের জন্য রঙ গণনা
                 ratio = i / text_width
                 r = int(gradient_start_color[0] * (1 - ratio) + gradient_end_color[0] * ratio)
                 g = int(gradient_start_color[1] * (1 - ratio) + gradient_end_color[1] * ratio)
                 b = int(gradient_start_color[2] * (1 - ratio) + gradient_end_color[2] * ratio)
-                # একটি উল্লম্ব লাইন আঁকুন
                 gradient_draw.line([(i, 0), (i, text_height)], fill=(r, g, b, 255))
             
-            # ৩. লেখার জন্য একটি মাস্ক (mask) তৈরি করুন
             mask = Image.new('L', (text_width, text_height), 0)
-            mask_draw = ImageDraw.Draw(mask)
-            mask_draw.text((0, 0), badge_text, font=badge_font, fill=255)
-
-            # ৪. মূল ছবিতে মাস্ক ব্যবহার করে গ্র্যাডিয়েন্টটি পেস্ট করুন
+            ImageDraw.Draw(mask).text((0, 0), badge_text, font=badge_font, fill=255)
             img.paste(gradient, (int(x), int(y)), mask)
 
         # ---- Existing Watermark Logic (Unchanged) ----
         if watermark_text:
+            # ... (এই অংশটি অপরিবর্তিত) ...
             font_size = int(img.width / 12)
-            try:
-                font = ImageFont.truetype("Poppins-Bold.ttf", font_size)
-            except IOError:
-                logger.warning("Poppins-Bold.ttf not found. Using default font.")
-                font = ImageFont.load_default()
+            try: font = ImageFont.truetype("Poppins-Bold.ttf", font_size)
+            except IOError: font = ImageFont.load_default()
             
             thumbnail = img.resize((150, 150))
             colors = thumbnail.getcolors(150*150)
             text_color = (255, 255, 255, 230)
             if colors:
                 dominant_color = sorted(colors, key=lambda x: x[0], reverse=True)[0][1]
-                text_color = (255 - dominant_color[0], 255 - dominant_color[1], 255 - dominant_color[2], 230)
+                text_color = (255-dominant_color[0], 255-dominant_color[1], 255-dominant_color[2], 230)
 
             bbox = draw.textbbox((0, 0), watermark_text, font=font)
             text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -196,11 +241,13 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
             draw.text((wx, wy), watermark_text, font=font, fill=text_color)
             
         buffer = io.BytesIO(); buffer.name = "poster.png"
-        img.save(buffer, "PNG"); buffer.seek(0)
+        img.convert("RGB").save(buffer, "PNG"); buffer.seek(0)
         return buffer, None
     except requests.exceptions.RequestException as e: return None, f"Network Error: {e}"
     except Exception as e: return None, f"Image processing error. Error: {e}"
 
+# ... (বাকি সমস্ত কোড অপরিবর্তিত থাকবে) ...
+# ... (The rest of the code remains unchanged) ...
 async def generate_channel_caption(data: dict, language: str, links: dict, user_data: dict):
     info = {
         "title": data.get("title") or data.get("name") or "N/A",
@@ -392,7 +439,7 @@ async def generate_final_post_preview(client, uid, cid, msg):
     
     poster_url = f"https://image.tmdb.org/t/p/w500{convo['details']['poster_path']}" if convo['details'].get('poster_path') else None
     
-    await msg.edit_text("🖼️ Creating poster...")
+    await msg.edit_text("🖼️ Creating smart poster...")
     poster, error = watermark_poster(poster_url, watermark, badge_text=badge)
     
     await msg.delete()

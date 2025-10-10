@@ -16,6 +16,8 @@ from pyrogram.errors import UserNotParticipant
 from flask import Flask
 from dotenv import load_dotenv
 import motor.motor_asyncio
+import cv2  # New import for face detection
+import numpy as np # New import for image processing
 
 # ---- 1. CONFIGURATION AND SETUP ----
 load_dotenv()
@@ -117,16 +119,39 @@ def get_tmdb_details(media_type: str, media_id: int):
     except Exception as e:
         logger.error(f"TMDB Details Error: {e}"); return None
 
+# ⭐️ NEW INTELLIGENT WATERMARK/BADGE FUNCTION ⭐️
 def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = None):
     if not poster_url: return None, "Poster URL not found."
     try:
         img_data = requests.get(poster_url, timeout=20).content
-        img = Image.open(io.BytesIO(img_data)).convert("RGBA")
-        draw = ImageDraw.Draw(img)
+        img_pil = Image.open(io.BytesIO(img_data)).convert("RGBA")
+        draw = ImageDraw.Draw(img_pil)
 
-        # ---- Badge Text Logic (Text at the TOP) ----
+        # ---- Badge Text Logic (INTELLIGENT PLACEMENT) ----
         if badge_text:
-            badge_font_size = int(img.width / 8)
+            try:
+                face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
+            except Exception as e:
+                logger.error(f"Could not load haarcascade model. Bot will use default position. Error: {e}")
+                face_cascade = None
+
+            img_cv = np.array(img_pil.convert('RGB'))
+            gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+
+            img_height, img_width, _ = img_cv.shape
+            top_zone_boundary = int(img_height * 0.35) 
+            
+            badge_y_pos = img_height * 0.05 
+            
+            if face_cascade:
+                faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+                is_face_in_top_zone = any(y < top_zone_boundary for (x, y, w, h) in faces)
+                
+                if is_face_in_top_zone:
+                    logger.info("Face detected in top zone, moving badge to bottom.")
+                    badge_y_pos = img_height * 0.75 
+            
+            badge_font_size = int(img_width / 8)
             try:
                 badge_font = ImageFont.truetype("HindSiliguri-Bold.ttf", badge_font_size)
             except IOError:
@@ -136,30 +161,25 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
             badge_fill = (255, 0, 0, 255)
             badge_outline = (0, 0, 0, 255)
             stroke_width = int(badge_font_size / 20) + 1
-
             bbox = draw.textbbox((0, 0), badge_text, font=badge_font)
-            text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            text_width, _ = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            badge_x_pos = (img_width - text_width) / 2
             
-            x = (img.width - text_width) / 2
-            y = img.height * 0.05
-
             for i in range(-stroke_width, stroke_width + 1):
                 for j in range(-stroke_width, stroke_width + 1):
-                    if i != 0 or j != 0:
-                        draw.text((x + i, y + j), badge_text, font=badge_font, fill=badge_outline)
-            
-            draw.text((x, y), badge_text, font=badge_font, fill=badge_fill)
+                    draw.text((badge_x_pos + i, badge_y_pos + j), badge_text, font=badge_font, fill=badge_outline)
+            draw.text((badge_x_pos, badge_y_pos), badge_text, font=badge_font, fill=badge_fill)
 
         # ---- Existing Watermark Logic (Unchanged) ----
         if watermark_text:
-            font_size = int(img.width / 12)
+            font_size = int(img_pil.width / 12)
             try:
                 font = ImageFont.truetype("Poppins-Bold.ttf", font_size)
             except IOError:
                 logger.warning("Poppins-Bold.ttf not found. Using default font.")
                 font = ImageFont.load_default()
             
-            thumbnail = img.resize((150, 150))
+            thumbnail = img_pil.resize((150, 150))
             colors = thumbnail.getcolors(150*150)
             text_color = (255, 255, 255, 230)
             if colors:
@@ -168,18 +188,19 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
 
             bbox = draw.textbbox((0, 0), watermark_text, font=font)
             text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            wx = (img.width - text_width) / 2
-            wy = img.height - text_height - (img.height * 0.05)
+            wx = (img_pil.width - text_width) / 2
+            wy = img_pil.height - text_height - (img_pil.height * 0.05)
             draw.text((wx + 2, wy + 2), watermark_text, font=font, fill=(0, 0, 0, 128))
             draw.text((wx, wy), watermark_text, font=font, fill=text_color)
             
         buffer = io.BytesIO(); buffer.name = "poster.png"
-        img.save(buffer, "PNG"); buffer.seek(0)
+        img_pil.save(buffer, "PNG"); buffer.seek(0)
         return buffer, None
     except requests.exceptions.RequestException as e: return None, f"Network Error: {e}"
     except Exception as e: return None, f"Image processing error. Error: {e}"
 
 async def generate_channel_caption(data: dict, language: str, links: dict, user_data: dict):
+    # This function remains unchanged
     info = {
         "title": data.get("title") or data.get("name") or "N/A",
         "year": (data.get("release_date") or data.get("first_air_date") or "----")[:4],
@@ -235,11 +256,12 @@ https://t.me/+GL_XAS4MsJg4ODM1"""
     return "\n\n".join(caption_parts)
 
 # ---- 4. BOT HANDLERS ----
+# All handlers from here remain the same as the previous final version
 @bot.on_message(filters.command("start") & filters.private)
 @force_subscribe
 async def start_cmd(client, message: Message):
     await add_user_to_db(message.from_user)
-    await message.reply_text(f"👋 **Welcome, {message.from_user.first_name}! I'm a Movie & Series Post Generator Bot.**\n\n"
+    await message.reply_text(f"👋 **Welcome, {message.from_user.first_name}! I'm an Intelligent Movie Post Generator Bot.**\n\n"
         "**Available Commands:**\n"
         "🔹 `/post <name>` - Create a post for a movie or series.\n"
         "🔹 `/badge <text>` - Set a temporary text badge for the next post.\n"
@@ -264,7 +286,7 @@ async def set_badge_text(client, message: Message):
         if uid not in user_conversations:
             user_conversations[uid] = {}
         user_conversations[uid]['temp_badge_text'] = badge_text
-        await message.reply_text(f"✅ **Badge text set to:** `{badge_text}`\n\nThis will be applied to your next `/post`.")
+        await message.reply_text(f"✅ **Badge text set to:** `{badge_text}`\n\nThis will be intelligently placed on your next `/post`.")
     else:
         if uid in user_conversations and 'temp_badge_text' in user_conversations[uid]:
             del user_conversations[uid]['temp_badge_text']
@@ -272,6 +294,7 @@ async def set_badge_text(client, message: Message):
         else:
             await message.reply_text("⚠️ **Usage:** `/badge Your Text Here`\nTo remove a badge, use `/badge` without any text.")
 
+# ... (The rest of the handlers: settings_commands, channel_management, etc. are exactly the same as before) ...
 @bot.on_message(filters.command(["setwatermark", "cancel", "setapi", "setdomain", "settutorial", "settings"]) & filters.private)
 @force_subscribe
 async def settings_commands(client, message: Message):
@@ -370,7 +393,7 @@ async def generate_final_post_preview(client, uid, cid, msg):
     
     poster_url = f"https://image.tmdb.org/t/p/w500{convo['details']['poster_path']}" if convo['details'].get('poster_path') else None
     
-    await msg.edit_text("🖼️ Creating poster...")
+    await msg.edit_text("🖼️ Analyzing poster and creating image...")
     poster, error = watermark_poster(poster_url, watermark, badge_text=badge)
     
     await msg.delete()

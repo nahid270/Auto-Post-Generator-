@@ -117,7 +117,6 @@ def get_tmdb_details(media_type: str, media_id: int):
     except Exception as e:
         logger.error(f"TMDB Details Error: {e}"); return None
 
-# ⭐️ UPDATED POSTER FUNCTION ⭐️
 def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = None):
     if not poster_url: return None, "Poster URL not found."
     try:
@@ -125,9 +124,9 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
         img = Image.open(io.BytesIO(img_data)).convert("RGBA")
         draw = ImageDraw.Draw(img)
 
-        # ---- NEW: Badge Text (e.g., "বাংলা ভাষায়") ----
+        # ---- Badge Text Logic (Text at the TOP) ----
         if badge_text:
-            badge_font_size = int(img.width / 7)
+            badge_font_size = int(img.width / 8)
             try:
                 badge_font = ImageFont.truetype("HindSiliguri-Bold.ttf", badge_font_size)
             except IOError:
@@ -140,8 +139,9 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
 
             bbox = draw.textbbox((0, 0), badge_text, font=badge_font)
             text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            
             x = (img.width - text_width) / 2
-            y = (img.height - text_height) / 2
+            y = img.height * 0.05
 
             for i in range(-stroke_width, stroke_width + 1):
                 for j in range(-stroke_width, stroke_width + 1):
@@ -150,7 +150,7 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
             
             draw.text((x, y), badge_text, font=badge_font, fill=badge_fill)
 
-        # ---- Existing Watermark Logic ----
+        # ---- Existing Watermark Logic (Unchanged) ----
         if watermark_text:
             font_size = int(img.width / 12)
             try:
@@ -178,7 +178,6 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
         return buffer, None
     except requests.exceptions.RequestException as e: return None, f"Network Error: {e}"
     except Exception as e: return None, f"Image processing error. Error: {e}"
-
 
 async def generate_channel_caption(data: dict, language: str, links: dict, user_data: dict):
     info = {
@@ -256,7 +255,6 @@ async def start_cmd(client, message: Message):
         "🔹 `/setdomain <URL>` - Set your shortener domain.\n"
         "🔹 `/settutorial <link>` - Set the download tutorial link.")
 
-# ⭐️ NEW COMMAND HANDLER ⭐️
 @bot.on_message(filters.command("badge") & filters.private)
 @force_subscribe
 async def set_badge_text(client, message: Message):
@@ -360,7 +358,6 @@ async def channel_management(client, message: Message):
         channel_text = "📋 **Your Saved Channels:**\n\n" + "\n".join([f"🔹 `{ch}`" for ch in channels])
         await message.reply_text(channel_text)
 
-# ⭐️ UPDATED PREVIEW FUNCTION ⭐️
 async def generate_final_post_preview(client, uid, cid, msg):
     convo = user_conversations.get(uid)
     if not convo: return
@@ -369,7 +366,6 @@ async def generate_final_post_preview(client, uid, cid, msg):
     caption = await generate_channel_caption(convo["details"], convo["language"], convo["links"], user_data)
     watermark = user_data.get('watermark_text')
     
-    # Get the badge text from the conversation and then remove it for the next post
     badge = convo.pop('temp_badge_text', None) 
     
     poster_url = f"https://image.tmdb.org/t/p/w500{convo['details']['poster_path']}" if convo['details'].get('poster_path') else None
@@ -492,7 +488,6 @@ async def selection_cb(client, cb: CallbackQuery):
     if not details: return await cb.message.edit_text("❌ Sorry, couldn't fetch details from TMDB.")
     
     uid = cb.from_user.id
-    # Critical change: Don't overwrite the entire dict if badge is set
     if uid not in user_conversations:
         user_conversations[uid] = {}
         

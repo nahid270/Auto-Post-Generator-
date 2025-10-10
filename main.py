@@ -117,13 +117,41 @@ def get_tmdb_details(media_type: str, media_id: int):
     except Exception as e:
         logger.error(f"TMDB Details Error: {e}"); return None
 
-def watermark_poster(poster_url: str, watermark_text: str):
+# ⭐️ UPDATED POSTER FUNCTION ⭐️
+def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = None):
     if not poster_url: return None, "Poster URL not found."
     try:
         img_data = requests.get(poster_url, timeout=20).content
         img = Image.open(io.BytesIO(img_data)).convert("RGBA")
+        draw = ImageDraw.Draw(img)
+
+        # ---- NEW: Badge Text (e.g., "বাংলা ভাষায়") ----
+        if badge_text:
+            badge_font_size = int(img.width / 7)
+            try:
+                badge_font = ImageFont.truetype("HindSiliguri-Bold.ttf", badge_font_size)
+            except IOError:
+                logger.warning("HindSiliguri-Bold.ttf not found. Using default font for badge.")
+                badge_font = ImageFont.load_default()
+
+            badge_fill = (255, 0, 0, 255)
+            badge_outline = (0, 0, 0, 255)
+            stroke_width = int(badge_font_size / 20) + 1
+
+            bbox = draw.textbbox((0, 0), badge_text, font=badge_font)
+            text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            x = (img.width - text_width) / 2
+            y = (img.height - text_height) / 2
+
+            for i in range(-stroke_width, stroke_width + 1):
+                for j in range(-stroke_width, stroke_width + 1):
+                    if i != 0 or j != 0:
+                        draw.text((x + i, y + j), badge_text, font=badge_font, fill=badge_outline)
+            
+            draw.text((x, y), badge_text, font=badge_font, fill=badge_fill)
+
+        # ---- Existing Watermark Logic ----
         if watermark_text:
-            draw = ImageDraw.Draw(img)
             font_size = int(img.width / 12)
             try:
                 font = ImageFont.truetype("Poppins-Bold.ttf", font_size)
@@ -140,10 +168,10 @@ def watermark_poster(poster_url: str, watermark_text: str):
 
             bbox = draw.textbbox((0, 0), watermark_text, font=font)
             text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            x = (img.width - text_width) / 2
-            y = img.height - text_height - (img.height * 0.05)
-            draw.text((x + 2, y + 2), watermark_text, font=font, fill=(0, 0, 0, 128))
-            draw.text((x, y), watermark_text, font=font, fill=text_color)
+            wx = (img.width - text_width) / 2
+            wy = img.height - text_height - (img.height * 0.05)
+            draw.text((wx + 2, wy + 2), watermark_text, font=font, fill=(0, 0, 0, 128))
+            draw.text((wx, wy), watermark_text, font=font, fill=text_color)
             
         buffer = io.BytesIO(); buffer.name = "poster.png"
         img.save(buffer, "PNG"); buffer.seek(0)
@@ -151,7 +179,7 @@ def watermark_poster(poster_url: str, watermark_text: str):
     except requests.exceptions.RequestException as e: return None, f"Network Error: {e}"
     except Exception as e: return None, f"Image processing error. Error: {e}"
 
-# ⭐️ FINAL TEMPLATE SYSTEM (WITH BOLD LINKS) ⭐️
+
 async def generate_channel_caption(data: dict, language: str, links: dict, user_data: dict):
     info = {
         "title": data.get("title") or data.get("name") or "N/A",
@@ -215,6 +243,7 @@ async def start_cmd(client, message: Message):
     await message.reply_text(f"👋 **Welcome, {message.from_user.first_name}! I'm a Movie & Series Post Generator Bot.**\n\n"
         "**Available Commands:**\n"
         "🔹 `/post <name>` - Create a post for a movie or series.\n"
+        "🔹 `/badge <text>` - Set a temporary text badge for the next post.\n"
         "🔹 `/cancel` - Cancel any ongoing process.\n\n"
         "**Channel Management:**\n"
         "🔹 `/addchannel <ID>` - Add a new channel for posting.\n"
@@ -226,6 +255,24 @@ async def start_cmd(client, message: Message):
         "🔹 `/setapi <API_KEY>` - Set your link shortener API Key.\n"
         "🔹 `/setdomain <URL>` - Set your shortener domain.\n"
         "🔹 `/settutorial <link>` - Set the download tutorial link.")
+
+# ⭐️ NEW COMMAND HANDLER ⭐️
+@bot.on_message(filters.command("badge") & filters.private)
+@force_subscribe
+async def set_badge_text(client, message: Message):
+    uid = message.from_user.id
+    if len(message.command) > 1:
+        badge_text = " ".join(message.command[1:])
+        if uid not in user_conversations:
+            user_conversations[uid] = {}
+        user_conversations[uid]['temp_badge_text'] = badge_text
+        await message.reply_text(f"✅ **Badge text set to:** `{badge_text}`\n\nThis will be applied to your next `/post`.")
+    else:
+        if uid in user_conversations and 'temp_badge_text' in user_conversations[uid]:
+            del user_conversations[uid]['temp_badge_text']
+            await message.reply_text("✅ Badge text has been removed.")
+        else:
+            await message.reply_text("⚠️ **Usage:** `/badge Your Text Here`\nTo remove a badge, use `/badge` without any text.")
 
 @bot.on_message(filters.command(["setwatermark", "cancel", "setapi", "setdomain", "settutorial", "settings"]) & filters.private)
 @force_subscribe
@@ -313,7 +360,7 @@ async def channel_management(client, message: Message):
         channel_text = "📋 **Your Saved Channels:**\n\n" + "\n".join([f"🔹 `{ch}`" for ch in channels])
         await message.reply_text(channel_text)
 
-# ⭐️ UPDATED FUNCTION with Channel Name Fetching ⭐️
+# ⭐️ UPDATED PREVIEW FUNCTION ⭐️
 async def generate_final_post_preview(client, uid, cid, msg):
     convo = user_conversations.get(uid)
     if not convo: return
@@ -321,10 +368,14 @@ async def generate_final_post_preview(client, uid, cid, msg):
     user_data = await users_collection.find_one({'_id': uid})
     caption = await generate_channel_caption(convo["details"], convo["language"], convo["links"], user_data)
     watermark = user_data.get('watermark_text')
+    
+    # Get the badge text from the conversation and then remove it for the next post
+    badge = convo.pop('temp_badge_text', None) 
+    
     poster_url = f"https://image.tmdb.org/t/p/w500{convo['details']['poster_path']}" if convo['details'].get('poster_path') else None
     
-    await msg.edit_text("🖼️ Creating poster and adding watermark...")
-    poster, error = watermark_poster(poster_url, watermark)
+    await msg.edit_text("🖼️ Creating poster...")
+    poster, error = watermark_poster(poster_url, watermark, badge_text=badge)
     
     await msg.delete()
     if error: await client.send_message(cid, f"⚠️ **Error creating poster:** `{error}`")
@@ -441,7 +492,11 @@ async def selection_cb(client, cb: CallbackQuery):
     if not details: return await cb.message.edit_text("❌ Sorry, couldn't fetch details from TMDB.")
     
     uid = cb.from_user.id
-    user_conversations[uid] = {"flow": flow, "details": details, "links": {}, "state": ""}
+    # Critical change: Don't overwrite the entire dict if badge is set
+    if uid not in user_conversations:
+        user_conversations[uid] = {}
+        
+    user_conversations[uid].update({"flow": flow, "details": details, "links": {}, "state": ""})
     
     if media_type == "tv":
         user_conversations[uid]["state"] = "wait_tv_lang"
@@ -450,7 +505,6 @@ async def selection_cb(client, cb: CallbackQuery):
         user_conversations[uid]["state"] = "wait_movie_lang"
         await cb.message.edit_text("**Movie Post:** Enter the language for the movie.")
 
-# ⭐️ UPDATED FUNCTION with Channel Name in messages ⭐️
 @bot.on_callback_query(filters.regex("^postto_"))
 async def post_to_channel_cb(client, cb: CallbackQuery):
     uid = cb.from_user.id

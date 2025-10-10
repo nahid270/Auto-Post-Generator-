@@ -148,7 +148,7 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
         
         draw = ImageDraw.Draw(img)
 
-        # ---- Badge Text Logic (Text at the TOP) - [ 🤖 স্মার্ট প্লেসমেন্ট সহ 🤖 ] ----
+        # ---- Badge Text Logic (Text at the TOP) - [ 🐞 বাগ ফিক্সড সংস্করণ 🐞 ] ----
         if badge_text:
             badge_font_size = int(img.width / 9)
             try:
@@ -157,39 +157,34 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
                 logger.warning("HindSiliguri-Bold.ttf not found. Using default font for badge.")
                 badge_font = ImageFont.load_default()
 
+            # লেখার আকার এবং অবস্থান গণনা
             bbox = draw.textbbox((0, 0), badge_text, font=badge_font)
-            text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            
             x = (img.width - text_width) / 2
             
             # --- স্বয়ংক্রিয়ভাবে সেরা অবস্থান খুঁজে বের করা ---
-            y_pos = img.height * 0.03  # ডিফল্ট অবস্থান
-            
-            cascade_path = download_cascade()
+            y_pos = img.height * 0.03
+            cascade_path = download_cascade() # face detection helper
             if cascade_path:
                 try:
-                    # PIL Image থেকে OpenCV Image এ রূপান্তর
                     cv_image = np.array(original_img.convert('RGB'))
                     gray = cv2.cvtColor(cv_image, cv2.COLOR_RGB2GRAY)
                     face_cascade = cv2.CascadeClassifier(cascade_path)
-                    # মুখ শনাক্তকরণ
                     faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
                     
-                    text_box_y1 = y_pos + text_height + int(badge_font_size * 0.2)
-                    is_collision = False
-                    for (fx, fy, fw, fh) in faces:
-                        # যদি টেক্সট বক্স কোনো মুখের উপর চলে আসে
-                        if y_pos < (fy + fh) and text_box_y1 > fy:
-                            is_collision = True
-                            break
+                    padding = int(badge_font_size * 0.2)
+                    text_box_y1 = y_pos + text_height + padding
+                    is_collision = any(y_pos < (fy + fh) and text_box_y1 > fy for (fx, fy, fw, fh) in faces)
                     
                     if is_collision:
                         logger.info("Face detected at the top. Moving badge text lower.")
-                        # নতুন নিরাপদ অবস্থান
                         y_pos = img.height * 0.25
                 except Exception as e:
                     logger.error(f"Face detection failed: {e}")
 
-            y = y_pos # চূড়ান্ত অবস্থান নির্ধারণ
+            y = y_pos
 
             # লেখার পিছনে স্বচ্ছ ব্যাকগ্রাউন্ড আঁকা
             padding = int(badge_font_size * 0.1)
@@ -202,7 +197,7 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
             img = Image.alpha_composite(img, rect_layer)
             draw = ImageDraw.Draw(img)
 
-            # গ্র্যাডিয়েন্ট টেক্সট তৈরি
+            # গ্র্যাডিয়েন্ট এবং মাস্ক তৈরি
             gradient = Image.new('RGBA', (text_width, text_height), (0, 0, 0, 0))
             gradient_draw = ImageDraw.Draw(gradient)
             
@@ -215,23 +210,29 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
                 b = int(gradient_start_color[2] * (1 - ratio) + gradient_end_color[2] * ratio)
                 gradient_draw.line([(i, 0), (i, text_height)], fill=(r, g, b, 255))
             
+            # মাস্ক তৈরি এবং টেক্সট আঁকা (এখানেই মূল সমাধান)
             mask = Image.new('L', (text_width, text_height), 0)
-            ImageDraw.Draw(mask).text((0, 0), badge_text, font=badge_font, fill=255)
+            mask_draw = ImageDraw.Draw(mask)
+            # <-- মূল পরিবর্তন: টেক্সট অ্যালাইনমেন্ট ঠিক করা হয়েছে, যাতে কোনো অংশ না কাটে
+            mask_draw.text((-bbox[0], -bbox[1]), badge_text, font=badge_font, fill=255)
+            
+            # চূড়ান্ত ছবিতে গ্র্যাডিয়েন্ট পেস্ট করা
             img.paste(gradient, (int(x), int(y)), mask)
 
         # ---- Existing Watermark Logic (Unchanged) ----
         if watermark_text:
-            # ... (এই অংশটি অপরিবর্তিত) ...
             font_size = int(img.width / 12)
-            try: font = ImageFont.truetype("Poppins-Bold.ttf", font_size)
-            except IOError: font = ImageFont.load_default()
+            try:
+                font = ImageFont.truetype("Poppins-Bold.ttf", font_size)
+            except IOError:
+                font = ImageFont.load_default()
             
             thumbnail = img.resize((150, 150))
             colors = thumbnail.getcolors(150*150)
             text_color = (255, 255, 255, 230)
             if colors:
                 dominant_color = sorted(colors, key=lambda x: x[0], reverse=True)[0][1]
-                text_color = (255-dominant_color[0], 255-dominant_color[1], 255-dominant_color[2], 230)
+                text_color = (255 - dominant_color[0], 255 - dominant_color[1], 255 - dominant_color[2], 230)
 
             bbox = draw.textbbox((0, 0), watermark_text, font=font)
             text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -240,14 +241,16 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
             draw.text((wx + 2, wy + 2), watermark_text, font=font, fill=(0, 0, 0, 128))
             draw.text((wx, wy), watermark_text, font=font, fill=text_color)
             
-        buffer = io.BytesIO(); buffer.name = "poster.png"
-        img.convert("RGB").save(buffer, "PNG"); buffer.seek(0)
+        buffer = io.BytesIO()
+        buffer.name = "poster.png"
+        img.convert("RGB").save(buffer, "PNG")
+        buffer.seek(0)
         return buffer, None
-    except requests.exceptions.RequestException as e: return None, f"Network Error: {e}"
-    except Exception as e: return None, f"Image processing error. Error: {e}"
+    except requests.exceptions.RequestException as e:
+        return None, f"Network Error: {e}"
+    except Exception as e:
+        return None, f"Image processing error. Error: {e}"
 
-# ... (বাকি সমস্ত কোড অপরিবর্তিত থাকবে) ...
-# ... (The rest of the code remains unchanged) ...
 async def generate_channel_caption(data: dict, language: str, links: dict, user_data: dict):
     info = {
         "title": data.get("title") or data.get("name") or "N/A",

@@ -17,7 +17,7 @@ from flask import Flask
 from dotenv import load_dotenv
 import motor.motor_asyncio
 import numpy as np
-import cv2
+import cv2  # OpenCV for Face Detection
 
 # ---- 1. CONFIGURATION AND SETUP ----
 load_dotenv()
@@ -120,7 +120,6 @@ def format_runtime(minutes: int):
 
 # ---- 3. TMDB API & CONTENT GENERATION ----
 
-# --- UPDATED: IMDb Search Function Added Here ---
 def search_tmdb_by_imdb(imdb_id: str):
     """IMDb ID (tt...) দিয়ে TMDB তে মুভি বা সিরিজ খোঁজার ফাংশন"""
     url = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={TMDB_API_KEY}&external_source=imdb_id"
@@ -128,7 +127,6 @@ def search_tmdb_by_imdb(imdb_id: str):
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         data = r.json()
-        # মুভি এবং টিভি রেজাল্ট একসাথে করা
         results = data.get("movie_results", []) + data.get("tv_results", [])
         return results
     except Exception as e:
@@ -483,44 +481,71 @@ async def generate_final_post_preview(client, uid, cid, msg):
     else:
         await client.send_message(cid, "✅ Preview generated. You have no channels saved. Use `/addchannel` to add one.", reply_to_message_id=preview_msg.id)
 
-# --- UPDATED: New /post handler with IMDb support ---
+# --- UPDATED: New /post handler with TMDB Link Support ---
 @bot.on_message(filters.command("post") & filters.private)
 @force_subscribe
 async def search_commands(client, message: Message):
     if len(message.command) == 1:
-        return await message.reply_text("**Usage:**\n`/post Movie Name`\nOR\n`/post IMDb Link/ID` (e.g., tt1234567)")
+        return await message.reply_text("**Usage:**\n`/post Movie Name`\nOR\n`/post TMDB Link`\nOR\n`/post IMDb ID`")
     
     query = " ".join(message.command[1:]).strip()
     processing_msg = await message.reply_text(f"🔍 Searching for `{query}`...")
 
     results = []
     
-    # Check if input is an IMDb ID or Link (matches strings starting with tt followed by digits)
+    # Check for TMDB Link (themoviedb.org/movie/12345...)
+    tmdb_link_match = re.search(r'(?:themoviedb\.org|tmdb\.org)/(movie|tv)/(\d+)', query)
+    
+    # Check for IMDb ID (tt12345...)
     imdb_match = re.search(r'(tt\d{6,})', query)
     
-    if imdb_match:
-        imdb_id = imdb_match.group(1)
-        await processing_msg.edit_text(f"🔗 IMDb ID `{imdb_id}` detected. Fetching details...")
-        results = search_tmdb_by_imdb(imdb_id)
-    else:
-        # Standard Name Search
-        results = search_tmdb(query)
+    try:
+        if tmdb_link_match:
+            # --- TMDB Link Logic ---
+            media_type = tmdb_link_match.group(1) # movie or tv
+            tmdb_id = tmdb_link_match.group(2)    # ID
+            
+            await processing_msg.edit_text(f"🔗 TMDB Link detected (ID: {tmdb_id}). Fetching...")
+            details = get_tmdb_details(media_type, int(tmdb_id))
+            
+            if details:
+                details['media_type'] = media_type 
+                results = [details]
+        
+        elif imdb_match:
+            # --- IMDb ID Logic ---
+            imdb_id = imdb_match.group(1)
+            await processing_msg.edit_text(f"🔗 IMDb ID `{imdb_id}` detected. Fetching...")
+            results = search_tmdb_by_imdb(imdb_id)
+            
+        else:
+            # --- Standard Name Search Logic ---
+            results = search_tmdb(query)
+
+    except Exception as e:
+        logger.error(f"Search processing error: {e}")
+        return await processing_msg.edit_text(f"❌ Error processing link: {e}")
 
     if not results:
-        return await processing_msg.edit_text("❌ No results found on TMDB.")
+        return await processing_msg.edit_text("❌ No results found. Please check the Name or Link.")
     
     buttons = []
     for r in results:
-        media_icon = '🎬' if r['media_type'] == 'movie' else '📺'
+        m_type = r.get('media_type')
+        if not m_type:
+            if 'title' in r: m_type = 'movie'
+            elif 'name' in r: m_type = 'tv'
+            else: continue
+
+        media_icon = '🎬' if m_type == 'movie' else '📺'
         title = r.get('title') or r.get('name')
         
-        # Safe Date Parsing
         date = r.get('release_date') or r.get('first_air_date') or '----'
         year = date.split('-')[0]
         
         buttons.append([InlineKeyboardButton(
             f"{media_icon} {title} ({year})", 
-            callback_data=f"select_post_{r['media_type']}_{r['id']}"
+            callback_data=f"select_post_{m_type}_{r['id']}"
         )])
         
     await processing_msg.edit_text("**👇 Choose from the results:**", reply_markup=InlineKeyboardMarkup(buttons))

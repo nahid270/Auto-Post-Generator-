@@ -17,7 +17,7 @@ from flask import Flask
 from dotenv import load_dotenv
 import motor.motor_asyncio
 import numpy as np
-import cv2  # <-- নতুন লাইব্রেরি
+import cv2
 
 # ---- 1. CONFIGURATION AND SETUP ----
 load_dotenv()
@@ -119,6 +119,22 @@ def format_runtime(minutes: int):
     return f"{hours}h {mins}m" if hours > 0 else f"{mins}m"
 
 # ---- 3. TMDB API & CONTENT GENERATION ----
+
+# --- UPDATED: IMDb Search Function Added Here ---
+def search_tmdb_by_imdb(imdb_id: str):
+    """IMDb ID (tt...) দিয়ে TMDB তে মুভি বা সিরিজ খোঁজার ফাংশন"""
+    url = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={TMDB_API_KEY}&external_source=imdb_id"
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        # মুভি এবং টিভি রেজাল্ট একসাথে করা
+        results = data.get("movie_results", []) + data.get("tv_results", [])
+        return results
+    except Exception as e:
+        logger.error(f"TMDB Find Error: {e}")
+        return []
+
 def search_tmdb(query: str):
     year, name = None, query.strip()
     match = re.search(r'(.+?)\s*\(?(\d{4})\)?$', query)
@@ -148,7 +164,7 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
         
         draw = ImageDraw.Draw(img)
 
-        # ---- Badge Text Logic (Text at the TOP) - [ 🐞 বাগ ফিক্সড সংস্করণ 🐞 ] ----
+        # ---- Badge Text Logic ----
         if badge_text:
             badge_font_size = int(img.width / 9)
             try:
@@ -157,16 +173,15 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
                 logger.warning("HindSiliguri-Bold.ttf not found. Using default font for badge.")
                 badge_font = ImageFont.load_default()
 
-            # লেখার আকার এবং অবস্থান গণনা
             bbox = draw.textbbox((0, 0), badge_text, font=badge_font)
             text_width = bbox[2] - bbox[0]
             text_height = bbox[3] - bbox[1]
             
             x = (img.width - text_width) / 2
             
-            # --- স্বয়ংক্রিয়ভাবে সেরা অবস্থান খুঁজে বের করা ---
+            # --- Face Detection Logic ---
             y_pos = img.height * 0.03
-            cascade_path = download_cascade() # face detection helper
+            cascade_path = download_cascade()
             if cascade_path:
                 try:
                     cv_image = np.array(original_img.convert('RGB'))
@@ -186,7 +201,6 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
 
             y = y_pos
 
-            # লেখার পিছনে স্বচ্ছ ব্যাকগ্রাউন্ড আঁকা
             padding = int(badge_font_size * 0.1)
             rect_layer = Image.new('RGBA', img.size, (0, 0, 0, 0))
             rect_draw = ImageDraw.Draw(rect_layer)
@@ -197,7 +211,6 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
             img = Image.alpha_composite(img, rect_layer)
             draw = ImageDraw.Draw(img)
 
-            # গ্র্যাডিয়েন্ট এবং মাস্ক তৈরি
             gradient = Image.new('RGBA', (text_width, text_height), (0, 0, 0, 0))
             gradient_draw = ImageDraw.Draw(gradient)
             
@@ -210,16 +223,13 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
                 b = int(gradient_start_color[2] * (1 - ratio) + gradient_end_color[2] * ratio)
                 gradient_draw.line([(i, 0), (i, text_height)], fill=(r, g, b, 255))
             
-            # মাস্ক তৈরি এবং টেক্সট আঁকা (এখানেই মূল সমাধান)
             mask = Image.new('L', (text_width, text_height), 0)
             mask_draw = ImageDraw.Draw(mask)
-            # <-- মূল পরিবর্তন: টেক্সট অ্যালাইনমেন্ট ঠিক করা হয়েছে, যাতে কোনো অংশ না কাটে
             mask_draw.text((-bbox[0], -bbox[1]), badge_text, font=badge_font, fill=255)
             
-            # চূড়ান্ত ছবিতে গ্র্যাডিয়েন্ট পেস্ট করা
             img.paste(gradient, (int(x), int(y)), mask)
 
-        # ---- Existing Watermark Logic (Unchanged) ----
+        # ---- Watermark Logic ----
         if watermark_text:
             font_size = int(img.width / 12)
             try:
@@ -473,23 +483,46 @@ async def generate_final_post_preview(client, uid, cid, msg):
     else:
         await client.send_message(cid, "✅ Preview generated. You have no channels saved. Use `/addchannel` to add one.", reply_to_message_id=preview_msg.id)
 
+# --- UPDATED: New /post handler with IMDb support ---
 @bot.on_message(filters.command("post") & filters.private)
 @force_subscribe
 async def search_commands(client, message: Message):
     if len(message.command) == 1:
-        return await message.reply_text("**Usage:** `/post Movie or Series Name`")
-    query = " ".join(message.command[1:])
+        return await message.reply_text("**Usage:**\n`/post Movie Name`\nOR\n`/post IMDb Link/ID` (e.g., tt1234567)")
+    
+    query = " ".join(message.command[1:]).strip()
     processing_msg = await message.reply_text(f"🔍 Searching for `{query}`...")
-    results = search_tmdb(query)
+
+    results = []
+    
+    # Check if input is an IMDb ID or Link (matches strings starting with tt followed by digits)
+    imdb_match = re.search(r'(tt\d{6,})', query)
+    
+    if imdb_match:
+        imdb_id = imdb_match.group(1)
+        await processing_msg.edit_text(f"🔗 IMDb ID `{imdb_id}` detected. Fetching details...")
+        results = search_tmdb_by_imdb(imdb_id)
+    else:
+        # Standard Name Search
+        results = search_tmdb(query)
+
     if not results:
-        return await processing_msg.edit_text("❌ No results found.")
+        return await processing_msg.edit_text("❌ No results found on TMDB.")
     
     buttons = []
     for r in results:
         media_icon = '🎬' if r['media_type'] == 'movie' else '📺'
         title = r.get('title') or r.get('name')
-        year = (r.get('release_date') or r.get('first_air_date') or '----').split('-')[0]
-        buttons.append([InlineKeyboardButton(f"{media_icon} {title} ({year})", callback_data=f"select_post_{r['media_type']}_{r['id']}")])
+        
+        # Safe Date Parsing
+        date = r.get('release_date') or r.get('first_air_date') or '----'
+        year = date.split('-')[0]
+        
+        buttons.append([InlineKeyboardButton(
+            f"{media_icon} {title} ({year})", 
+            callback_data=f"select_post_{r['media_type']}_{r['id']}"
+        )])
+        
     await processing_msg.edit_text("**👇 Choose from the results:**", reply_markup=InlineKeyboardMarkup(buttons))
 
 @bot.on_message(filters.text & filters.private)

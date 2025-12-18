@@ -5,6 +5,7 @@ import os
 import io
 import re
 import requests
+import asyncio
 from threading import Thread
 import logging
 
@@ -12,7 +13,7 @@ import logging
 from PIL import Image, ImageDraw, ImageFont
 from pyrogram import Client, filters, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
-from pyrogram.errors import UserNotParticipant
+from pyrogram.errors import UserNotParticipant, FloodWait
 from flask import Flask
 from dotenv import load_dotenv
 import motor.motor_asyncio
@@ -27,6 +28,7 @@ API_HASH = os.getenv("API_HASH")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 FORCE_SUB_CHANNEL = os.getenv("FORCE_SUB_CHANNEL")
 INVITE_LINK = os.getenv("INVITE_LINK")
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))  # <--- MUST SET THIS IN .ENV
 
 # ⭐️ Setup basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -65,18 +67,30 @@ def download_cascade():
             r.raise_for_status()
             with open(cascade_file, 'wb') as f:
                 f.write(r.content)
-            logger.info("Download complete.")
         except Exception as e:
-            logger.error(f"Could not download cascade file. Face detection will be disabled. Error: {e}")
+            logger.error(f"Could not download cascade file. Error: {e}")
             return None
     return cascade_file
 
+# --- DATABASE & PREMIUM HELPERS ---
+
 async def add_user_to_db(user):
+    # Default is_premium to False unless already set
     await users_collection.update_one(
         {'_id': user.id},
-        {'$set': {'first_name': user.first_name}},
+        {
+            '$set': {'first_name': user.first_name},
+            '$setOnInsert': {'is_premium': False} 
+        },
         upsert=True
     )
+
+async def is_user_premium(user_id: int) -> bool:
+    if user_id == OWNER_ID: return True # Owner is always premium
+    user_data = await users_collection.find_one({'_id': user_id})
+    return user_data.get('is_premium', False) if user_data else False
+
+# --- DECORATORS ---
 
 def force_subscribe(func):
     async def wrapper(client, message):
@@ -86,8 +100,28 @@ def force_subscribe(func):
                 await client.get_chat_member(chat_id, message.from_user.id)
             except UserNotParticipant:
                 join_link = INVITE_LINK or f"https://t.me/{FORCE_SUB_CHANNEL.replace('@', '')}"
-                return await message.reply_text("❗ **You must join our channel to use this bot.**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👉 Join Channel", url=join_link)]]))
+                return await message.reply_text(
+                    "❗ **You must join our channel to use this bot.**", 
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👉 Join Channel", url=join_link)]])
+                )
         await func(client, message)
+    return wrapper
+
+def check_premium(func):
+    """Decorator to restrict commands to Premium Users only"""
+    async def wrapper(client, message):
+        user_id = message.from_user.id
+        if await is_user_premium(user_id):
+            await func(client, message)
+        else:
+            await message.reply_text(
+                "⛔ **Access Denied!**\n\n"
+                "This is a **Premium Feature**. You need to buy a subscription to use this bot.\n\n"
+                "👉 Contact Admin to buy Premium.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("👑 Contact Admin", user_id=OWNER_ID)]
+                ])
+            )
     return wrapper
 
 async def shorten_link(user_id: int, long_url: str):
@@ -104,13 +138,10 @@ async def shorten_link(user_id: int, long_url: str):
         response.raise_for_status()
         data = response.json()
         if data.get("status") == "success" and data.get("shortenedUrl"):
-            logger.info(f"Successfully shortened URL for user {user_id}")
             return data["shortenedUrl"]
         else:
-            logger.warning(f"Shortener API returned an error for user {user_id}: {data.get('message', 'Unknown error')}")
             return long_url
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to call shortener API for user {user_id}. Error: {e}")
+    except requests.exceptions.RequestException:
         return long_url
 
 def format_runtime(minutes: int):
@@ -121,16 +152,13 @@ def format_runtime(minutes: int):
 # ---- 3. TMDB API & CONTENT GENERATION ----
 
 def search_tmdb_by_imdb(imdb_id: str):
-    """IMDb ID (tt...) দিয়ে TMDB তে মুভি বা সিরিজ খোঁজার ফাংশন"""
     url = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={TMDB_API_KEY}&external_source=imdb_id"
     try:
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         data = r.json()
-        results = data.get("movie_results", []) + data.get("tv_results", [])
-        return results
-    except Exception as e:
-        logger.error(f"TMDB Find Error: {e}")
+        return data.get("movie_results", []) + data.get("tv_results", [])
+    except Exception:
         return []
 
 def search_tmdb(query: str):
@@ -141,32 +169,28 @@ def search_tmdb(query: str):
     try:
         r = requests.get(url, timeout=10); r.raise_for_status()
         return [res for res in r.json().get("results", []) if res.get("media_type") in ["movie", "tv"]][:5]
-    except Exception as e:
-        logger.error(f"TMDB Search Error: {e}"); return []
+    except Exception:
+        return []
 
 def get_tmdb_details(media_type: str, media_id: int):
     url = f"https://api.themoviedb.org/3/{media_type}/{media_id}?api_key={TMDB_API_KEY}&append_to_response=credits"
     try:
         r = requests.get(url, timeout=10); r.raise_for_status(); return r.json()
-    except Exception as e:
-        logger.error(f"TMDB Details Error: {e}"); return None
+    except Exception:
+        return None
 
-# --- Watermark Poster to support both URL and Manual Upload (BytesIO) ---
 def watermark_poster(poster_input, watermark_text: str, badge_text: str = None):
     # poster_input can be a String (URL) or BytesIO (File)
     if not poster_input: return None, "Poster not found."
     try:
         if isinstance(poster_input, str):
-            # It's a URL
             img_data = requests.get(poster_input, timeout=20).content
             original_img = Image.open(io.BytesIO(img_data)).convert("RGBA")
         else:
-            # It's a file (BytesIO)
             original_img = Image.open(poster_input).convert("RGBA")
         
         img = Image.new("RGBA", original_img.size)
         img.paste(original_img)
-        
         draw = ImageDraw.Draw(img)
 
         # ---- Badge Text Logic ----
@@ -175,13 +199,11 @@ def watermark_poster(poster_input, watermark_text: str, badge_text: str = None):
             try:
                 badge_font = ImageFont.truetype("HindSiliguri-Bold.ttf", badge_font_size)
             except IOError:
-                logger.warning("HindSiliguri-Bold.ttf not found. Using default font for badge.")
                 badge_font = ImageFont.load_default()
 
             bbox = draw.textbbox((0, 0), badge_text, font=badge_font)
             text_width = bbox[2] - bbox[0]
             text_height = bbox[3] - bbox[1]
-            
             x = (img.width - text_width) / 2
             
             # --- Face Detection Logic ---
@@ -199,20 +221,14 @@ def watermark_poster(poster_input, watermark_text: str, badge_text: str = None):
                     is_collision = any(y_pos < (fy + fh) and text_box_y1 > fy for (fx, fy, fw, fh) in faces)
                     
                     if is_collision:
-                        logger.info("Face detected at the top. Moving badge text lower.")
                         y_pos = img.height * 0.25
-                except Exception as e:
-                    logger.error(f"Face detection failed: {e}")
+                except Exception: pass
 
             y = y_pos
-
             padding = int(badge_font_size * 0.1)
             rect_layer = Image.new('RGBA', img.size, (0, 0, 0, 0))
             rect_draw = ImageDraw.Draw(rect_layer)
-            rect_draw.rectangle(
-                (x - padding, y - padding, x + text_width + padding, y + text_height + padding), 
-                fill=(0, 0, 0, 140)
-            )
+            rect_draw.rectangle((x - padding, y - padding, x + text_width + padding, y + text_height + padding), fill=(0, 0, 0, 140))
             img = Image.alpha_composite(img, rect_layer)
             draw = ImageDraw.Draw(img)
 
@@ -231,7 +247,6 @@ def watermark_poster(poster_input, watermark_text: str, badge_text: str = None):
             mask = Image.new('L', (text_width, text_height), 0)
             mask_draw = ImageDraw.Draw(mask)
             mask_draw.text((-bbox[0], -bbox[1]), badge_text, font=badge_font, fill=255)
-            
             img.paste(gradient, (int(x), int(y)), mask)
 
         # ---- Watermark Logic ----
@@ -261,23 +276,17 @@ def watermark_poster(poster_input, watermark_text: str, badge_text: str = None):
         img.convert("RGB").save(buffer, "PNG")
         buffer.seek(0)
         return buffer, None
-    except requests.exceptions.RequestException as e:
-        return None, f"Network Error: {e}"
     except Exception as e:
         return None, f"Image processing error. Error: {e}"
 
-# --- Caption Generation with Strict Movie/TV Logic ---
 async def generate_channel_caption(data: dict, language: str, links: dict, user_data: dict):
-    # Determine Genre String
+    # Determine Genre
     if isinstance(data.get("genres"), list) and len(data["genres"]) > 0:
-        if isinstance(data["genres"][0], dict):
-            genre_str = ", ".join([g["name"] for g in data.get("genres", [])[:3]])
-        else:
-            genre_str = str(data.get("genres"))
+        genre_str = ", ".join([g["name"] for g in data.get("genres", [])[:3]]) if isinstance(data["genres"][0], dict) else str(data.get("genres"))
     else:
         genre_str = str(data.get("genres", "N/A"))
 
-    # Determine Year based on Media Type
+    # Determine Year
     if data.get('media_type') == 'tv':
         date = data.get("first_air_date") or "----"
     else:
@@ -305,34 +314,26 @@ async def generate_channel_caption(data: dict, language: str, links: dict, user_
     
     download_links = ""
     
-    # --- STRICT CHECK: Only if it is TV/Series ---
     if data.get('media_type') == 'tv':
         if links:
-            try:
-                sorted_seasons = sorted(links.keys(), key=lambda x: int(x))
-            except:
-                sorted_seasons = links.keys()
+            try: sorted_seasons = sorted(links.keys(), key=lambda x: int(x))
+            except: sorted_seasons = links.keys()
 
             season_lines = []
             for season_num in sorted_seasons:
                 season_data = links[season_num]
-                
-                # Check if it's new system (dict with qualities) or old system (string)
                 if isinstance(season_data, dict):
                     parts = []
                     if season_data.get('480p'): parts.append(f"**[480p]({season_data['480p']})**")
                     if season_data.get('720p'): parts.append(f"**[720p]({season_data['720p']})**")
                     if season_data.get('1080p'): parts.append(f"**[1080p]({season_data['1080p']})**")
-                    
                     if parts:
                         link_line = " | ".join(parts)
                         season_lines.append(f"📂 **Season {season_num}:** {link_line}")
                 else:
                     season_lines.append(f"✅ **[Download Season {season_num}]({season_data})**")
-            
             download_links = "\n".join(season_lines)
     else:
-        # --- Movie Logic ---
         movie_links = []
         if links.get('480p'): movie_links.append(f"**[Download 480p]({links['480p']})**")
         if links.get('720p'): movie_links.append(f"**[Download 720p]({links['720p']})**")
@@ -356,29 +357,116 @@ https://t.me/+GL_XAS4MsJg4ODM1"""
     caption_parts.append(static_footer)
     return "\n\n".join(caption_parts)
 
-# ---- 4. BOT HANDLERS ----
+# ---- 4. BOT HANDLERS (UPDATED START & PREMIUM LOGIC) ----
+
 @bot.on_message(filters.command("start") & filters.private)
 @force_subscribe
 async def start_cmd(client, message: Message):
-    await add_user_to_db(message.from_user)
-    await message.reply_text(f"👋 **Welcome, {message.from_user.first_name}! I'm a Movie & Series Post Generator Bot.**\n\n"
-        "**Available Commands:**\n"
-        "🔹 `/post <name>` - Create a post for a movie or series.\n"
-        "🔹 `/badge <text>` - Set a temporary text badge for the next post.\n"
-        "🔹 `/cancel` - Cancel any ongoing process.\n\n"
-        "**Channel Management:**\n"
-        "🔹 `/addchannel <ID>` - Add a new channel for posting.\n"
-        "🔹 `/delchannel <ID>` - Remove a saved channel.\n"
-        "🔹 `/mychannels` - View your list of saved channels.\n\n"
-        "**Settings:**\n"
-        "🔹 `/settings` - View your current settings.\n"
-        "🔹 `/setwatermark <text>` - Set a watermark for posters.\n"
-        "🔹 `/setapi <API_KEY>` - Set your link shortener API Key.\n"
-        "🔹 `/setdomain <URL>` - Set your shortener domain.\n"
-        "🔹 `/settutorial <link>` - Set the download tutorial link.")
+    user = message.from_user
+    uid = user.id
+    await add_user_to_db(user)
+    
+    # Clean up previous states
+    if uid in user_conversations: del user_conversations[uid]
+
+    is_premium = await is_user_premium(uid)
+    is_owner = (uid == OWNER_ID)
+    
+    status_text = "💎 **Premium User**" if is_premium else "👤 **Free User**"
+    
+    # --- ADMIN / OWNER MENU ---
+    if is_owner:
+        welcome_text = (
+            f"👑 **Welcome Boss, {user.first_name}!**\n\n"
+            "**Admin Control Panel:**\n"
+            "Use the buttons below to manage your bot and users."
+        )
+        buttons = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"),
+             InlineKeyboardButton("📊 User Stats", callback_data="admin_stats")],
+            [InlineKeyboardButton("➕ Add Premium", callback_data="admin_add_premium"),
+             InlineKeyboardButton("➖ Remove Premium", callback_data="admin_rem_premium")],
+            [InlineKeyboardButton("📝 Help Guide", callback_data="help_guide")]
+        ])
+    
+    # --- USER MENU ---
+    else:
+        welcome_text = (
+            f"👋 **Hello {user.first_name}!**\n\n"
+            "I am your **Ultimate Movie & Series Post Generator**.\n"
+            f"Your Status: {status_text}\n\n"
+            "⚠️ **Note:** Only Premium users can generate posts."
+        )
+        
+        user_buttons = [
+            [InlineKeyboardButton("👤 My Account", callback_data="my_account"),
+             InlineKeyboardButton("❓ Help", callback_data="help_guide")]
+        ]
+        
+        # If user is NOT premium, show Buy button
+        if not is_premium:
+            user_buttons.insert(0, [InlineKeyboardButton("💎 Buy Premium Access", user_id=OWNER_ID)])
+            
+        buttons = InlineKeyboardMarkup(user_buttons)
+
+    await message.reply_text(welcome_text, reply_markup=buttons)
+
+# --- CALLBACK QUERY HANDLER FOR MENUS ---
+@bot.on_callback_query(filters.regex(r"^(admin_|my_account|help_guide|back_home)"))
+async def menu_callbacks(client, cb: CallbackQuery):
+    data = cb.data
+    uid = cb.from_user.id
+    
+    if data == "back_home":
+        await start_cmd(client, cb.message)
+        return
+
+    if data == "my_account":
+        status = "Premium 💎" if await is_user_premium(uid) else "Free 👤"
+        await cb.answer(f"User: {cb.from_user.first_name}\nID: {uid}\nStatus: {status}", show_alert=True)
+    
+    elif data == "help_guide":
+        text = (
+            "**📚 Bot Command Guide:**\n\n"
+            "**For Premium Users:**\n"
+            "🔹 `/post <Movie Name>` - Create a post (TMDB).\n"
+            "🔹 `/post <IMDb ID>` - Create post by IMDb ID.\n"
+            "🔹 `/post <Link>` - Create post by TMDB Link.\n"
+            "🔹 `/badge <Text>` - Add badge to poster.\n"
+            "🔹 `/settings` - Manage watermark & shortener.\n"
+            "🔹 `/addchannel <ID>` - Add channel (-100...).\n\n"
+            "**For Admins:**\n"
+            "Use the buttons in `/start` menu."
+        )
+        await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back_home")]]))
+
+    # --- ADMIN ACTIONS ---
+    elif data.startswith("admin_"):
+        if uid != OWNER_ID:
+            return await cb.answer("❌ You are not the Admin!", show_alert=True)
+
+        if data == "admin_stats":
+            total = await users_collection.count_documents({})
+            prem = await users_collection.count_documents({'is_premium': True})
+            await cb.answer(f"📊 Total Users: {total}\n💎 Premium Users: {prem}", show_alert=True)
+        
+        elif data == "admin_broadcast":
+            await cb.message.edit_text("📢 **Broadcast Mode**\n\nPlease send the message you want to broadcast to all users.\n\nType `/cancel` to stop.")
+            user_conversations[uid] = {"state": "admin_broadcast_wait", "is_manual": False}
+        
+        elif data == "admin_add_premium":
+            await cb.message.edit_text("➕ **Add Premium User**\n\nSend the **User ID** to grant Premium access.\n\nType `/cancel` to stop.")
+            user_conversations[uid] = {"state": "admin_add_prem_wait", "is_manual": False}
+        
+        elif data == "admin_rem_premium":
+            await cb.message.edit_text("➖ **Remove Premium User**\n\nSend the **User ID** to revoke Premium access.\n\nType `/cancel` to stop.")
+            user_conversations[uid] = {"state": "admin_rem_prem_wait", "is_manual": False}
+
+# ---- PREMIUM LOCKED COMMANDS ----
 
 @bot.on_message(filters.command("badge") & filters.private)
 @force_subscribe
+@check_premium
 async def set_badge_text(client, message: Message):
     uid = message.from_user.id
     if len(message.command) > 1:
@@ -396,6 +484,7 @@ async def set_badge_text(client, message: Message):
 
 @bot.on_message(filters.command(["setwatermark", "cancel", "setapi", "setdomain", "settutorial", "settings"]) & filters.private)
 @force_subscribe
+@check_premium
 async def settings_commands(client, message: Message):
     command = message.command[0].lower()
     uid = message.from_user.id
@@ -454,6 +543,7 @@ async def settings_commands(client, message: Message):
 
 @bot.on_message(filters.command(["addchannel", "delchannel", "mychannels"]) & filters.private)
 @force_subscribe
+@check_premium
 async def channel_management(client, message: Message):
     command = message.command[0].lower()
     uid = message.from_user.id
@@ -487,17 +577,13 @@ async def generate_final_post_preview(client, uid, cid, msg):
     user_data = await users_collection.find_one({'_id': uid})
     caption = await generate_channel_caption(convo["details"], convo["language"], convo["links"], user_data)
     watermark = user_data.get('watermark_text')
-    
     badge = convo.pop('temp_badge_text', None) 
     
-    # Handle Poster (URL or BytesIO)
     poster_input = None
     if convo['details'].get('poster_bytes'):
-        # It's a Manual Upload (BytesIO)
         poster_input = convo['details']['poster_bytes']
         poster_input.seek(0)
     elif convo['details'].get('poster_path'):
-        # It's a TMDB URL
         poster_input = f"https://image.tmdb.org/t/p/w500{convo['details']['poster_path']}"
     
     await msg.edit_text("🖼️ Creating smart poster...")
@@ -506,7 +592,6 @@ async def generate_final_post_preview(client, uid, cid, msg):
     await msg.delete()
     if error: await client.send_message(cid, f"⚠️ **Error creating poster:** `{error}`")
 
-    # If it's a file, we need to treat it as BytesIO for sending
     poster_buffer = None
     if poster:
         poster_buffer = io.BytesIO(poster.read())
@@ -522,10 +607,9 @@ async def generate_final_post_preview(client, uid, cid, msg):
                 chat = await client.get_chat(int(channel_id))
                 channel_name = chat.title
                 buttons.append([InlineKeyboardButton(f"📢 Post to {channel_name}", callback_data=f"postto_{channel_id}")])
-            except Exception as e:
-                logger.warning(f"Could not get chat info for ID {channel_id}. Maybe bot was kicked? Error: {e}")
+            except Exception:
+                buttons.append([InlineKeyboardButton(f"📢 Post to {channel_id}", callback_data=f"postto_{channel_id}")])
         
-        # Show preview
         if poster_buffer:
             poster_buffer.seek(0)
             preview_msg = await client.send_photo(cid, photo=poster_buffer, caption=caption, parse_mode=enums.ParseMode.MARKDOWN)
@@ -533,11 +617,7 @@ async def generate_final_post_preview(client, uid, cid, msg):
             preview_msg = await client.send_message(cid, caption, parse_mode=enums.ParseMode.MARKDOWN)
 
         if buttons:
-            await client.send_message(cid, "**👆 This is a preview. Choose a channel to post to:**",
-                reply_to_message_id=preview_msg.id,
-                reply_markup=InlineKeyboardMarkup(buttons))
-        else:
-            await client.send_message(cid, "⚠️ Could not find any valid channels.", reply_to_message_id=preview_msg.id)
+            await client.send_message(cid, "**👆 This is a preview. Choose a channel to post to:**", reply_to_message_id=preview_msg.id, reply_markup=InlineKeyboardMarkup(buttons))
     else:
         if poster_buffer:
             poster_buffer.seek(0)
@@ -548,6 +628,7 @@ async def generate_final_post_preview(client, uid, cid, msg):
 
 @bot.on_message(filters.command("post") & filters.private)
 @force_subscribe
+@check_premium
 async def search_commands(client, message: Message):
     if len(message.command) == 1:
         return await message.reply_text("**Usage:**\n`/post Movie Name`\nOR\n`/post TMDB Link`\nOR\n`/post IMDb ID`")
@@ -556,41 +637,30 @@ async def search_commands(client, message: Message):
     processing_msg = await message.reply_text(f"🔍 Searching for `{query}`...")
 
     results = []
-    
-    # Check for TMDB Link (themoviedb.org/movie/12345...)
     tmdb_link_match = re.search(r'(?:themoviedb\.org|tmdb\.org)/(movie|tv)/(\d+)', query)
-    
-    # Check for IMDb ID (tt12345...)
     imdb_match = re.search(r'(tt\d{6,})', query)
     
     try:
         if tmdb_link_match:
-            # --- TMDB Link Logic ---
             media_type = tmdb_link_match.group(1) # movie or tv
             tmdb_id = tmdb_link_match.group(2)    # ID
-            
             await processing_msg.edit_text(f"🔗 TMDB Link detected (ID: {tmdb_id}). Fetching...")
             details = get_tmdb_details(media_type, int(tmdb_id))
-            
             if details:
                 details['media_type'] = media_type 
                 results = [details]
         
         elif imdb_match:
-            # --- IMDb ID Logic ---
             imdb_id = imdb_match.group(1)
             await processing_msg.edit_text(f"🔗 IMDb ID `{imdb_id}` detected. Fetching...")
             results = search_tmdb_by_imdb(imdb_id)
-            
         else:
-            # --- Standard Name Search Logic ---
             results = search_tmdb(query)
 
     except Exception as e:
         logger.error(f"Search processing error: {e}")
         return await processing_msg.edit_text(f"❌ Error processing link: {e}")
 
-    # Build Buttons
     buttons = []
     if results:
         for r in results:
@@ -602,38 +672,28 @@ async def search_commands(client, message: Message):
 
             media_icon = '🎬' if m_type == 'movie' else '📺'
             title = r.get('title') or r.get('name')
-            
             date = r.get('release_date') or r.get('first_air_date') or '----'
             year = date.split('-')[0]
             
-            buttons.append([InlineKeyboardButton(
-                f"{media_icon} {title} ({year})", 
-                callback_data=f"select_post_{m_type}_{r['id']}"
-            )])
+            buttons.append([InlineKeyboardButton(f"{media_icon} {title} ({year})", callback_data=f"select_post_{m_type}_{r['id']}")])
     
-    # Add Manual Button
     buttons.append([InlineKeyboardButton("📝 Create Manually (Not in TMDB)", callback_data="manual_start")])
-        
     await processing_msg.edit_text(f"👇 **Results for:** `{query}`", reply_markup=InlineKeyboardMarkup(buttons))
 
-# Handler for Manual Flow
+# Handler for Manual Flow & Select
 @bot.on_callback_query(filters.regex("^manual_"))
 async def manual_handler(client, cb: CallbackQuery):
     data = cb.data
     uid = cb.from_user.id
     
     if data == "manual_start":
-        await cb.message.edit_text(
-            "Is this a Movie or a Web Series?",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎬 Movie", callback_data="manual_type_movie"),
-                 InlineKeyboardButton("📺 Web Series", callback_data="manual_type_tv")]
-            ])
-        )
+        await cb.message.edit_text("Is this a Movie or a Web Series?", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎬 Movie", callback_data="manual_type_movie"),
+             InlineKeyboardButton("📺 Web Series", callback_data="manual_type_tv")]
+        ]))
     
     elif data.startswith("manual_type_"):
         m_type = data.split("_")[2] # movie or tv
-        # Initialize manual session
         user_conversations[uid] = {
             "details": {"media_type": m_type},
             "links": {},
@@ -646,15 +706,12 @@ async def manual_handler(client, cb: CallbackQuery):
 async def selection_cb(client, cb: CallbackQuery):
     await cb.answer("Fetching details...", show_alert=False)
     try: _, flow, media_type, mid = cb.data.split("_", 3)
-    except Exception as e:
-        logger.error(f"Callback Error on split: {e}"); return await cb.message.edit_text("Invalid callback data.")
+    except: return await cb.message.edit_text("Invalid callback data.")
         
     details = get_tmdb_details(media_type, int(mid))
     if not details: return await cb.message.edit_text("❌ Sorry, couldn't fetch details from TMDB.")
     
-    # Fix media type in details if missing
     if 'media_type' not in details: details['media_type'] = media_type
-
     uid = cb.from_user.id
     user_conversations[uid] = {"details": details, "links": {}, "state": ""}
     
@@ -665,7 +722,7 @@ async def selection_cb(client, cb: CallbackQuery):
         user_conversations[uid]["state"] = "wait_movie_lang"
         await cb.message.edit_text("**Movie Post:** Enter the language for the movie.")
 
-# Unified Conversation Handler (Manual + TMDB + Series Quality)
+# ---- 5. UNIFIED CONVERSATION HANDLER (Admin Inputs + Post Inputs) ----
 @bot.on_message(filters.private & (filters.text | filters.photo))
 @force_subscribe
 async def conversation_handler(client, message: Message):
@@ -676,50 +733,79 @@ async def conversation_handler(client, message: Message):
     state = convo["state"]
     text = message.text.strip() if message.text else None
     
-    # ==========================
-    # 1. MANUAL ENTRY STATES
-    # ==========================
+    # --- ADMIN STATES ---
+    if state == "admin_broadcast_wait":
+        if uid != OWNER_ID: return
+        msg = await message.reply_text("📣 Sending Broadcast... Please wait.")
+        users = users_collection.find({})
+        sent, failed = 0, 0
+        async for user in users:
+            try:
+                await message.copy(chat_id=user['_id'])
+                sent += 1
+                await asyncio.sleep(0.1)
+            except: failed += 1
+        await msg.edit_text(f"✅ **Broadcast Complete!**\n\nSent: {sent}\nFailed: {failed}")
+        del user_conversations[uid]
+        return
+
+    elif state == "admin_add_prem_wait":
+        if uid != OWNER_ID: return
+        try:
+            target_id = int(text)
+            await users_collection.update_one({'_id': target_id}, {'$set': {'is_premium': True}}, upsert=True)
+            await message.reply_text(f"✅ User `{target_id}` is now **Premium**.")
+        except: await message.reply_text("❌ Invalid ID.")
+        del user_conversations[uid]
+        return
+
+    elif state == "admin_rem_prem_wait":
+        if uid != OWNER_ID: return
+        try:
+            target_id = int(text)
+            await users_collection.update_one({'_id': target_id}, {'$set': {'is_premium': False}})
+            await message.reply_text(f"✅ User `{target_id}` is now **Free**.")
+        except: await message.reply_text("❌ Invalid ID.")
+        del user_conversations[uid]
+        return
+
+    # --- REGULAR USER POST STATES ---
+    # (Premium Check applied via logic flow, initial entry was guarded)
+    
     if state == "wait_manual_title":
         convo["details"]["title"] = text
-        convo["details"]["name"] = text # Backup for TV
+        convo["details"]["name"] = text
         convo["state"] = "wait_manual_year"
         await message.reply_text("✅ Title set. Now send the **Year** (e.g. 2025):")
 
     elif state == "wait_manual_year":
-        # Strict Date Setting to separate Movie vs TV Logic
         if convo["details"]["media_type"] == "tv":
             convo["details"]["first_air_date"] = f"{text}-01-01"
             convo["details"]["release_date"] = None
         else:
             convo["details"]["release_date"] = f"{text}-01-01"
             convo["details"]["first_air_date"] = None
-            
         convo["state"] = "wait_manual_rating"
         await message.reply_text("✅ Year set. Now send the **Rating** (e.g. 7.5):")
 
     elif state == "wait_manual_rating":
-        try:
-            rating = float(text)
-        except ValueError:
-            rating = 0.0
+        try: rating = float(text)
+        except: rating = 0.0
         convo["details"]["vote_average"] = rating
         convo["state"] = "wait_manual_genres"
-        await message.reply_text("✅ Rating set. Now send the **Genres** (e.g. Action, Drama, Thriller):")
+        await message.reply_text("✅ Rating set. Now send the **Genres** (e.g. Action, Drama):")
 
     elif state == "wait_manual_genres":
-        convo["details"]["genres"] = text # Store as string
+        convo["details"]["genres"] = text
         convo["state"] = "wait_manual_poster"
         await message.reply_text("✅ Genres set. Now **Send a Photo** to use as the Poster:")
 
     elif state == "wait_manual_poster":
-        if not message.photo:
-            return await message.reply_text("⚠️ Please send an image (Photo), not a file.")
-        
+        if not message.photo: return await message.reply_text("⚠️ Please send an image (Photo).")
         msg = await message.reply_text("📥 Downloading poster...")
         photo = await client.download_media(message, in_memory=True)
-        convo["details"]["poster_bytes"] = photo # Store BytesIO
+        convo["details"]["poster_bytes"] = photo
         
-        # Branch to Movie/TV logic
         if convo["details"]["media_type"] == "tv":
             convo["state"] = "wait_tv_lang"
             await msg.edit_text("✅ Poster saved.\n\n**Web Series:** Enter the language (e.g. English, Hindi):")
@@ -727,98 +813,63 @@ async def conversation_handler(client, message: Message):
             convo["state"] = "wait_movie_lang"
             await msg.edit_text("✅ Poster saved.\n\n**Movie:** Enter the language:")
 
-    # ==========================
-    # 2. MOVIE LINK STATES
-    # ==========================
     elif state == "wait_movie_lang":
         convo["language"] = text; convo["state"] = "wait_480p"
         await message.reply_text("✅ Language set. Now send the **480p** link or type `skip`.")
     
     elif state == "wait_480p":
         if text.lower() != 'skip':
-            s_msg = await message.reply("🔗 Shortening link...", quote=True)
-            link = await shorten_link(uid, text)
-            convo["links"]["480p"] = link
-            await s_msg.delete()
+            convo["links"]["480p"] = await shorten_link(uid, text)
         convo["state"] = "wait_720p"
         await message.reply_text("✅ Saved. Now send the **720p** link or type `skip`.")
 
     elif state == "wait_720p":
         if text.lower() != 'skip':
-            s_msg = await message.reply("🔗 Shortening link...", quote=True)
-            link = await shorten_link(uid, text)
-            convo["links"]["720p"] = link
-            await s_msg.delete()
+            convo["links"]["720p"] = await shorten_link(uid, text)
         convo["state"] = "wait_1080p"
         await message.reply_text("✅ Saved. Now send the **1080p** link or type `skip`.")
 
     elif state == "wait_1080p":
         if text.lower() != 'skip':
-            s_msg = await message.reply("🔗 Shortening link...", quote=True)
-            link = await shorten_link(uid, text)
-            convo["links"]["1080p"] = link
-            await s_msg.delete()
-        
+            convo["links"]["1080p"] = await shorten_link(uid, text)
         msg = await message.reply_text("✅ All data collected! Generating preview...")
         await generate_final_post_preview(client, uid, message.chat.id, msg)
 
-    # ==========================
-    # 3. SERIES LINK STATES (UPDATED)
-    # ==========================
     elif state == "wait_tv_lang":
         convo["language"] = text; convo["state"] = "wait_season_number"
-        await message.reply_text("✅ Language set. Now enter the **Season Number** (e.g., 1, 2).")
+        await message.reply_text("✅ Language set. Now enter the **Season Number** (e.g., 1).")
 
     elif state == "wait_season_number":
         if text.lower() == 'done':
-            if not convo.get('links'): return await message.reply_text("⚠️ You haven't added any season links.")
-            msg = await message.reply_text("✅ All season data collected! Generating preview...", quote=True)
+            if not convo.get('links'): return await message.reply_text("⚠️ No season links added.")
+            msg = await message.reply_text("✅ Generating preview...", quote=True)
             await generate_final_post_preview(client, uid, message.chat.id, msg)
             return
         
-        if not text.isdigit() or int(text) <= 0:
-            return await message.reply_text("❌ Invalid number. Please enter a valid season number (e.g., 1).")
-        
+        if not text.isdigit(): return await message.reply_text("❌ Invalid number.")
         convo['current_season'] = text
-        
-        # Initialize season dict if not exists
         if 'links' not in convo: convo['links'] = {}
         if text not in convo['links']: convo['links'][text] = {}
-
         convo['state'] = 'wait_season_480'
-        await message.reply_text(f"👍 **Season {text}** selected.\n\nSend the **480p** link for Season {text} (or type `skip`).")
+        await message.reply_text(f"👍 **Season {text}** selected.\n\nSend **480p** link (or type `skip`).")
 
-    # --- Season Qualities Loop ---
     elif state == "wait_season_480":
         s_num = convo['current_season']
-        if text.lower() != 'skip':
-            s_msg = await message.reply("🔗 Shortening...", quote=True)
-            link = await shorten_link(uid, text)
-            convo['links'][s_num]['480p'] = link
-            await s_msg.delete()
+        if text.lower() != 'skip': convo['links'][s_num]['480p'] = await shorten_link(uid, text)
         convo['state'] = 'wait_season_720'
-        await message.reply_text(f"Send the **720p** link for Season {s_num} (or type `skip`).")
+        await message.reply_text(f"Send **720p** link (or `skip`).")
 
     elif state == "wait_season_720":
         s_num = convo['current_season']
-        if text.lower() != 'skip':
-            s_msg = await message.reply("🔗 Shortening...", quote=True)
-            link = await shorten_link(uid, text)
-            convo['links'][s_num]['720p'] = link
-            await s_msg.delete()
+        if text.lower() != 'skip': convo['links'][s_num]['720p'] = await shorten_link(uid, text)
         convo['state'] = 'wait_season_1080'
-        await message.reply_text(f"Send the **1080p** link for Season {s_num} (or type `skip`).")
+        await message.reply_text(f"Send **1080p** link (or `skip`).")
 
     elif state == "wait_season_1080":
         s_num = convo['current_season']
-        if text.lower() != 'skip':
-            s_msg = await message.reply("🔗 Shortening...", quote=True)
-            link = await shorten_link(uid, text)
-            convo['links'][s_num]['1080p'] = link
-            await s_msg.delete()
-        
+        if text.lower() != 'skip': convo['links'][s_num]['1080p'] = await shorten_link(uid, text)
         convo['state'] = 'wait_season_number'
-        await message.reply_text(f"✅ Season {s_num} links saved.\n\n**👉 Enter the next Season Number (e.g. 2), or type `done` to finish.**")
+        await message.reply_text(f"✅ Season {s_num} saved.\n\n**👉 Enter next Season Number, or type `done` to finish.**")
 
 @bot.on_callback_query(filters.regex("^postto_"))
 async def post_to_channel_cb(client, cb: CallbackQuery):
@@ -828,34 +879,24 @@ async def post_to_channel_cb(client, cb: CallbackQuery):
     convo = user_conversations.get(uid)
     if not convo or 'final_post' not in convo:
         await cb.answer("❌ Session expired!", show_alert=True)
-        return await cb.message.edit_text("Sorry, the data for this post is no longer available. Please start over.")
+        return
 
-    await cb.answer("⏳ Posting to channel...", show_alert=False)
-    
+    await cb.answer("⏳ Posting...", show_alert=False)
     final_post = convo['final_post']
-    caption = final_post['caption']
-    poster_buffer = final_post['poster']
-
+    
     try:
-        chat = await client.get_chat(int(channel_id))
-        channel_name = chat.title
-
-        if poster_buffer:
-            poster_buffer.seek(0)
-            await client.send_photo(chat_id=int(channel_id), photo=poster_buffer, caption=caption, parse_mode=enums.ParseMode.MARKDOWN)
+        if final_post['poster']:
+            final_post['poster'].seek(0)
+            await client.send_photo(int(channel_id), final_post['poster'], caption=final_post['caption'], parse_mode=enums.ParseMode.MARKDOWN)
         else:
-            await client.send_message(chat_id=int(channel_id), text=caption, parse_mode=enums.ParseMode.MARKDOWN)
-        
-        await cb.message.edit_text(f"✅ **Successfully posted to channel '{channel_name}'!**")
+            await client.send_message(int(channel_id), final_post['caption'], parse_mode=enums.ParseMode.MARKDOWN)
+        await cb.message.edit_text(f"✅ **Posted to channel successfully!**")
     except Exception as e:
-        logger.error(f"Failed to post to channel {channel_id} for user {uid}. Error: {e}")
-        await cb.message.edit_text(f"❌ **Failed to post to channel `{channel_id}`.**\n\n**Error:** `{e}`")
+        await cb.message.edit_text(f"❌ **Failed to post.**\nError: `{e}`")
     finally:
-        if uid in user_conversations:
-            del user_conversations[uid]
+        if uid in user_conversations: del user_conversations[uid]
 
-# ---- 5. START THE BOT ----
+# ---- 6. START THE BOT ----
 if __name__ == "__main__":
-    logger.info("🚀 Bot is starting with MongoDB connection...")
+    logger.info("🚀 Bot is starting with Premium System...")
     bot.run()
-    logger.info("👋 Bot has stopped.")

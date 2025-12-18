@@ -151,7 +151,7 @@ def get_tmdb_details(media_type: str, media_id: int):
     except Exception as e:
         logger.error(f"TMDB Details Error: {e}"); return None
 
-# --- UPDATE: Watermark Poster to support both URL and Manual Upload (BytesIO) ---
+# --- Watermark Poster to support both URL and Manual Upload (BytesIO) ---
 def watermark_poster(poster_input, watermark_text: str, badge_text: str = None):
     # poster_input can be a String (URL) or BytesIO (File)
     if not poster_input: return None, "Poster not found."
@@ -266,22 +266,26 @@ def watermark_poster(poster_input, watermark_text: str, badge_text: str = None):
     except Exception as e:
         return None, f"Image processing error. Error: {e}"
 
-# --- UPDATE: Caption Generation for Series Qualities ---
+# --- Caption Generation with Strict Movie/TV Logic ---
 async def generate_channel_caption(data: dict, language: str, links: dict, user_data: dict):
-    # Determine Genre String (Handle Manual List or TMDB List)
+    # Determine Genre String
     if isinstance(data.get("genres"), list) and len(data["genres"]) > 0:
         if isinstance(data["genres"][0], dict):
-             # TMDB Format: [{'id': 28, 'name': 'Action'}, ...]
             genre_str = ", ".join([g["name"] for g in data.get("genres", [])[:3]])
         else:
-            # Manual Format: "Action, Drama"
-             genre_str = str(data.get("genres"))
+            genre_str = str(data.get("genres"))
     else:
         genre_str = str(data.get("genres", "N/A"))
 
+    # Determine Year based on Media Type
+    if data.get('media_type') == 'tv':
+        date = data.get("first_air_date") or "----"
+    else:
+        date = data.get("release_date") or "----"
+
     info = {
         "title": data.get("title") or data.get("name") or "N/A",
-        "year": (data.get("release_date") or data.get("first_air_date") or "----")[:4],
+        "year": date[:4],
         "genres": genre_str,
         "rating": f"{data.get('vote_average', 0):.1f}",
         "language": language,
@@ -301,10 +305,9 @@ async def generate_channel_caption(data: dict, language: str, links: dict, user_
     
     download_links = ""
     
-    # Check if it's a TV Show (TMDB 'tv' type or Manual TV type)
-    if data.get('media_type') == 'tv' or 'first_air_date' in data:
+    # --- STRICT CHECK: Only if it is TV/Series ---
+    if data.get('media_type') == 'tv':
         if links:
-            # Sort seasons numerically
             try:
                 sorted_seasons = sorted(links.keys(), key=lambda x: int(x))
             except:
@@ -312,9 +315,9 @@ async def generate_channel_caption(data: dict, language: str, links: dict, user_
 
             season_lines = []
             for season_num in sorted_seasons:
-                season_data = links[season_num] # Expecting dict: {'480p': 'url', '720p': 'url'...}
+                season_data = links[season_num]
                 
-                # Check if season_data is a dict (New System) or string (Old System backup)
+                # Check if it's new system (dict with qualities) or old system (string)
                 if isinstance(season_data, dict):
                     parts = []
                     if season_data.get('480p'): parts.append(f"**[480p]({season_data['480p']})**")
@@ -325,12 +328,11 @@ async def generate_channel_caption(data: dict, language: str, links: dict, user_
                         link_line = " | ".join(parts)
                         season_lines.append(f"📂 **Season {season_num}:** {link_line}")
                 else:
-                    # Old simple link fallback
                     season_lines.append(f"✅ **[Download Season {season_num}]({season_data})**")
             
             download_links = "\n".join(season_lines)
     else:
-        # Movie Logic
+        # --- Movie Logic ---
         movie_links = []
         if links.get('480p'): movie_links.append(f"**[Download 480p]({links['480p']})**")
         if links.get('720p'): movie_links.append(f"**[Download 720p]({links['720p']})**")
@@ -488,7 +490,7 @@ async def generate_final_post_preview(client, uid, cid, msg):
     
     badge = convo.pop('temp_badge_text', None) 
     
-    # --- UPDATE: Handle Poster (URL or BytesIO) ---
+    # Handle Poster (URL or BytesIO)
     poster_input = None
     if convo['details'].get('poster_bytes'):
         # It's a Manual Upload (BytesIO)
@@ -609,12 +611,12 @@ async def search_commands(client, message: Message):
                 callback_data=f"select_post_{m_type}_{r['id']}"
             )])
     
-    # --- UPDATE: Add Manual Button ---
+    # Add Manual Button
     buttons.append([InlineKeyboardButton("📝 Create Manually (Not in TMDB)", callback_data="manual_start")])
         
     await processing_msg.edit_text(f"👇 **Results for:** `{query}`", reply_markup=InlineKeyboardMarkup(buttons))
 
-# --- UPDATE: New Handler for Manual Flow ---
+# Handler for Manual Flow
 @bot.on_callback_query(filters.regex("^manual_"))
 async def manual_handler(client, cb: CallbackQuery):
     data = cb.data
@@ -663,7 +665,7 @@ async def selection_cb(client, cb: CallbackQuery):
         user_conversations[uid]["state"] = "wait_movie_lang"
         await cb.message.edit_text("**Movie Post:** Enter the language for the movie.")
 
-# --- UPDATE: Unified Conversation Handler (Manual + TMDB + Series Quality) ---
+# Unified Conversation Handler (Manual + TMDB + Series Quality)
 @bot.on_message(filters.private & (filters.text | filters.photo))
 @force_subscribe
 async def conversation_handler(client, message: Message):
@@ -684,9 +686,14 @@ async def conversation_handler(client, message: Message):
         await message.reply_text("✅ Title set. Now send the **Year** (e.g. 2025):")
 
     elif state == "wait_manual_year":
-        # Create a fake date format for compatibility
-        convo["details"]["release_date"] = f"{text}-01-01"
-        convo["details"]["first_air_date"] = f"{text}-01-01"
+        # Strict Date Setting to separate Movie vs TV Logic
+        if convo["details"]["media_type"] == "tv":
+            convo["details"]["first_air_date"] = f"{text}-01-01"
+            convo["details"]["release_date"] = None
+        else:
+            convo["details"]["release_date"] = f"{text}-01-01"
+            convo["details"]["first_air_date"] = None
+            
         convo["state"] = "wait_manual_rating"
         await message.reply_text("✅ Year set. Now send the **Rating** (e.g. 7.5):")
 

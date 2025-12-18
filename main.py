@@ -151,11 +151,18 @@ def get_tmdb_details(media_type: str, media_id: int):
     except Exception as e:
         logger.error(f"TMDB Details Error: {e}"); return None
 
-def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = None):
-    if not poster_url: return None, "Poster URL not found."
+# --- UPDATE: Watermark Poster to support both URL and Manual Upload (BytesIO) ---
+def watermark_poster(poster_input, watermark_text: str, badge_text: str = None):
+    # poster_input can be a String (URL) or BytesIO (File)
+    if not poster_input: return None, "Poster not found."
     try:
-        img_data = requests.get(poster_url, timeout=20).content
-        original_img = Image.open(io.BytesIO(img_data)).convert("RGBA")
+        if isinstance(poster_input, str):
+            # It's a URL
+            img_data = requests.get(poster_input, timeout=20).content
+            original_img = Image.open(io.BytesIO(img_data)).convert("RGBA")
+        else:
+            # It's a file (BytesIO)
+            original_img = Image.open(poster_input).convert("RGBA")
         
         img = Image.new("RGBA", original_img.size)
         img.paste(original_img)
@@ -259,17 +266,26 @@ def watermark_poster(poster_url: str, watermark_text: str, badge_text: str = Non
     except Exception as e:
         return None, f"Image processing error. Error: {e}"
 
+# --- UPDATE: Caption Generation for Series Qualities ---
 async def generate_channel_caption(data: dict, language: str, links: dict, user_data: dict):
+    # Determine Genre String (Handle Manual List or TMDB List)
+    if isinstance(data.get("genres"), list) and len(data["genres"]) > 0:
+        if isinstance(data["genres"][0], dict):
+             # TMDB Format: [{'id': 28, 'name': 'Action'}, ...]
+            genre_str = ", ".join([g["name"] for g in data.get("genres", [])[:3]])
+        else:
+            # Manual Format: "Action, Drama"
+             genre_str = str(data.get("genres"))
+    else:
+        genre_str = str(data.get("genres", "N/A"))
+
     info = {
         "title": data.get("title") or data.get("name") or "N/A",
         "year": (data.get("release_date") or data.get("first_air_date") or "----")[:4],
-        "genres": ", ".join([g["name"] for g in data.get("genres", [])[:3]]) or "N/A",
+        "genres": genre_str,
         "rating": f"{data.get('vote_average', 0):.1f}",
         "language": language,
         "runtime": format_runtime(data.get("runtime", 0) if 'runtime' in data else (data.get("episode_run_time") or [0])[0]),
-        "link_480p": links.get('480p', ''),
-        "link_720p": links.get('720p', ''),
-        "link_1080p": links.get('1080p', ''),
     }
 
     caption_header = f"""🎬 **{info['title']} ({info['year']})**
@@ -284,17 +300,41 @@ async def generate_channel_caption(data: dict, language: str, links: dict, user_
 👇  ℍ𝕚𝕘𝕙 𝕊𝕡𝕖𝕖𝕕 | ℕ𝕠 𝔹𝕦𝕗𝕗𝕖𝕣𝕚𝕟𝕘  👇"""
     
     download_links = ""
-    if 'first_air_date' in data and links:
-        sorted_seasons = sorted(links.keys(), key=lambda x: int(x))
-        season_links = []
-        for season_num in sorted_seasons:
-            season_links.append(f"✅ **[Download Season {season_num}]({links[season_num]})**")
-        download_links = "\n".join(season_links)
+    
+    # Check if it's a TV Show (TMDB 'tv' type or Manual TV type)
+    if data.get('media_type') == 'tv' or 'first_air_date' in data:
+        if links:
+            # Sort seasons numerically
+            try:
+                sorted_seasons = sorted(links.keys(), key=lambda x: int(x))
+            except:
+                sorted_seasons = links.keys()
+
+            season_lines = []
+            for season_num in sorted_seasons:
+                season_data = links[season_num] # Expecting dict: {'480p': 'url', '720p': 'url'...}
+                
+                # Check if season_data is a dict (New System) or string (Old System backup)
+                if isinstance(season_data, dict):
+                    parts = []
+                    if season_data.get('480p'): parts.append(f"**[480p]({season_data['480p']})**")
+                    if season_data.get('720p'): parts.append(f"**[720p]({season_data['720p']})**")
+                    if season_data.get('1080p'): parts.append(f"**[1080p]({season_data['1080p']})**")
+                    
+                    if parts:
+                        link_line = " | ".join(parts)
+                        season_lines.append(f"📂 **Season {season_num}:** {link_line}")
+                else:
+                    # Old simple link fallback
+                    season_lines.append(f"✅ **[Download Season {season_num}]({season_data})**")
+            
+            download_links = "\n".join(season_lines)
     else:
+        # Movie Logic
         movie_links = []
-        if info['link_480p']: movie_links.append(f"**[Download 480p]({info['link_480p']})**")
-        if info['link_720p']: movie_links.append(f"**[Download 720p]({info['link_720p']})**")
-        if info['link_1080p']: movie_links.append(f"**[Download 1080p]({info['link_1080p']})**")
+        if links.get('480p'): movie_links.append(f"**[Download 480p]({links['480p']})**")
+        if links.get('720p'): movie_links.append(f"**[Download 720p]({links['720p']})**")
+        if links.get('1080p'): movie_links.append(f"**[Download 1080p]({links['1080p']})**")
         download_links = "\n\n".join(movie_links)
 
     static_footer = """Movie ReQuest Group 
@@ -448,17 +488,28 @@ async def generate_final_post_preview(client, uid, cid, msg):
     
     badge = convo.pop('temp_badge_text', None) 
     
-    poster_url = f"https://image.tmdb.org/t/p/w500{convo['details']['poster_path']}" if convo['details'].get('poster_path') else None
+    # --- UPDATE: Handle Poster (URL or BytesIO) ---
+    poster_input = None
+    if convo['details'].get('poster_bytes'):
+        # It's a Manual Upload (BytesIO)
+        poster_input = convo['details']['poster_bytes']
+        poster_input.seek(0)
+    elif convo['details'].get('poster_path'):
+        # It's a TMDB URL
+        poster_input = f"https://image.tmdb.org/t/p/w500{convo['details']['poster_path']}"
     
     await msg.edit_text("🖼️ Creating smart poster...")
-    poster, error = watermark_poster(poster_url, watermark, badge_text=badge)
+    poster, error = watermark_poster(poster_input, watermark, badge_text=badge)
     
     await msg.delete()
     if error: await client.send_message(cid, f"⚠️ **Error creating poster:** `{error}`")
 
-    poster_buffer = io.BytesIO(poster.read()) if poster else None
-    
-    preview_msg = await client.send_photo(cid, photo=io.BytesIO(poster_buffer.getvalue()) if poster_buffer else poster, caption=caption, parse_mode=enums.ParseMode.MARKDOWN)
+    # If it's a file, we need to treat it as BytesIO for sending
+    poster_buffer = None
+    if poster:
+        poster_buffer = io.BytesIO(poster.read())
+        poster_buffer.name = "final_poster.png"
+
     user_conversations[uid]['final_post'] = {'caption': caption, 'poster': poster_buffer}
 
     saved_channels = user_data.get('channel_ids', [])
@@ -472,16 +523,27 @@ async def generate_final_post_preview(client, uid, cid, msg):
             except Exception as e:
                 logger.warning(f"Could not get chat info for ID {channel_id}. Maybe bot was kicked? Error: {e}")
         
+        # Show preview
+        if poster_buffer:
+            poster_buffer.seek(0)
+            preview_msg = await client.send_photo(cid, photo=poster_buffer, caption=caption, parse_mode=enums.ParseMode.MARKDOWN)
+        else:
+            preview_msg = await client.send_message(cid, caption, parse_mode=enums.ParseMode.MARKDOWN)
+
         if buttons:
             await client.send_message(cid, "**👆 This is a preview. Choose a channel to post to:**",
                 reply_to_message_id=preview_msg.id,
                 reply_markup=InlineKeyboardMarkup(buttons))
         else:
-            await client.send_message(cid, "⚠️ Could not find any valid channels. Make sure the bot is a member of the channels you've added.", reply_to_message_id=preview_msg.id)
+            await client.send_message(cid, "⚠️ Could not find any valid channels.", reply_to_message_id=preview_msg.id)
     else:
-        await client.send_message(cid, "✅ Preview generated. You have no channels saved. Use `/addchannel` to add one.", reply_to_message_id=preview_msg.id)
+        if poster_buffer:
+            poster_buffer.seek(0)
+            await client.send_photo(cid, photo=poster_buffer, caption=caption, parse_mode=enums.ParseMode.MARKDOWN)
+        else:
+            await client.send_message(cid, caption, parse_mode=enums.ParseMode.MARKDOWN)
+        await client.send_message(cid, "✅ Preview generated. You have no channels saved. Use `/addchannel` to add one.")
 
-# --- UPDATED: New /post handler with TMDB Link Support ---
 @bot.on_message(filters.command("post") & filters.private)
 @force_subscribe
 async def search_commands(client, message: Message):
@@ -526,86 +588,57 @@ async def search_commands(client, message: Message):
         logger.error(f"Search processing error: {e}")
         return await processing_msg.edit_text(f"❌ Error processing link: {e}")
 
-    if not results:
-        return await processing_msg.edit_text("❌ No results found. Please check the Name or Link.")
-    
+    # Build Buttons
     buttons = []
-    for r in results:
-        m_type = r.get('media_type')
-        if not m_type:
-            if 'title' in r: m_type = 'movie'
-            elif 'name' in r: m_type = 'tv'
-            else: continue
+    if results:
+        for r in results:
+            m_type = r.get('media_type')
+            if not m_type:
+                if 'title' in r: m_type = 'movie'
+                elif 'name' in r: m_type = 'tv'
+                else: continue
 
-        media_icon = '🎬' if m_type == 'movie' else '📺'
-        title = r.get('title') or r.get('name')
-        
-        date = r.get('release_date') or r.get('first_air_date') or '----'
-        year = date.split('-')[0]
-        
-        buttons.append([InlineKeyboardButton(
-            f"{media_icon} {title} ({year})", 
-            callback_data=f"select_post_{m_type}_{r['id']}"
-        )])
-        
-    await processing_msg.edit_text("**👇 Choose from the results:**", reply_markup=InlineKeyboardMarkup(buttons))
-
-@bot.on_message(filters.text & filters.private)
-@force_subscribe
-async def conversation_handler(client, message: Message):
-    uid, text = message.from_user.id, message.text.strip()
-    convo = user_conversations.get(uid)
-    if not convo or "state" not in convo: return
+            media_icon = '🎬' if m_type == 'movie' else '📺'
+            title = r.get('title') or r.get('name')
+            
+            date = r.get('release_date') or r.get('first_air_date') or '----'
+            year = date.split('-')[0]
+            
+            buttons.append([InlineKeyboardButton(
+                f"{media_icon} {title} ({year})", 
+                callback_data=f"select_post_{m_type}_{r['id']}"
+            )])
     
-    state = convo["state"]
-    processing_msg = None
+    # --- UPDATE: Add Manual Button ---
+    buttons.append([InlineKeyboardButton("📝 Create Manually (Not in TMDB)", callback_data="manual_start")])
+        
+    await processing_msg.edit_text(f"👇 **Results for:** `{query}`", reply_markup=InlineKeyboardMarkup(buttons))
 
-    async def process_link(quality, next_state, next_prompt):
-        nonlocal processing_msg
-        if text.lower() != 'skip':
-            processing_msg = await message.reply("🔗 Shortening link...", quote=True)
-            shortened = await shorten_link(uid, text)
-            convo["links"][quality] = shortened
-        convo["state"] = next_state
-        prompt = f"✅ Link {'shortened and added' if text.lower() != 'skip' else 'skipped'}. Now, {next_prompt}"
-        if processing_msg: await processing_msg.edit_text(prompt)
-        else: await message.reply_text(prompt)
-
-    if state == "wait_movie_lang":
-        convo["language"] = text; convo["state"] = "wait_480p"
-        await message.reply_text("✅ Language set. Now send the **480p** link or type `skip`.")
-    elif state == "wait_480p":
-        await process_link("480p", "wait_720p", "send the **720p** link or type `skip`.")
-    elif state == "wait_720p":
-        await process_link("720p", "wait_1080p", "send the **1080p** link or type `skip`.")
-    elif state == "wait_1080p":
-        if text.lower() != 'skip':
-            processing_msg = await message.reply("🔗 Shortening link...", quote=True)
-            shortened = await shorten_link(uid, text)
-            convo["links"]["1080p"] = shortened
-        msg = await (processing_msg.edit_text if processing_msg else message.reply)("✅ Data collection complete! Generating preview...")
-        await generate_final_post_preview(client, uid, message.chat.id, msg)
-
-    elif state == "wait_tv_lang":
-        convo["language"] = text; convo["state"] = "wait_season_number"
-        await message.reply_text("✅ Language set. Now enter the season number (e.g., 1, 2).")
-    elif state == "wait_season_number":
-        if text.lower() == 'done':
-            if not convo.get('seasons'): return await message.reply_text("⚠️ You haven't added any season links.")
-            msg = await message.reply_text("✅ All season data collected! Generating preview...", quote=True)
-            convo['links'] = convo['seasons']
-            await generate_final_post_preview(client, uid, message.chat.id, msg)
-            return
-        if not text.isdigit() or int(text) <= 0: return await message.reply_text("❌ Invalid number. Please enter a valid season number.")
-        convo['current_season'] = text; convo['state'] = 'wait_season_link'
-        await message.reply_text(f"👍 OK. Now send the download link for **Season {text}**.")
-    elif state == "wait_season_link":
-        season_num = convo.get('current_season')
-        processing_msg = await message.reply("🔗 Shortening link...", quote=True)
-        shortened = await shorten_link(uid, text)
-        convo.setdefault('seasons', {})[season_num] = shortened
-        convo['state'] = 'wait_season_number'
-        await processing_msg.edit_text(f"✅ Link for Season {season_num} added.\n\n**👉 Enter the next season number, or type `done` to finish.**")
+# --- UPDATE: New Handler for Manual Flow ---
+@bot.on_callback_query(filters.regex("^manual_"))
+async def manual_handler(client, cb: CallbackQuery):
+    data = cb.data
+    uid = cb.from_user.id
+    
+    if data == "manual_start":
+        await cb.message.edit_text(
+            "Is this a Movie or a Web Series?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎬 Movie", callback_data="manual_type_movie"),
+                 InlineKeyboardButton("📺 Web Series", callback_data="manual_type_tv")]
+            ])
+        )
+    
+    elif data.startswith("manual_type_"):
+        m_type = data.split("_")[2] # movie or tv
+        # Initialize manual session
+        user_conversations[uid] = {
+            "details": {"media_type": m_type},
+            "links": {},
+            "state": "wait_manual_title",
+            "is_manual": True
+        }
+        await cb.message.edit_text(f"📝 **Manual {m_type.capitalize()} Mode**\n\nPlease send the **Title** of the content:")
 
 @bot.on_callback_query(filters.regex("^select_"))
 async def selection_cb(client, cb: CallbackQuery):
@@ -617,11 +650,11 @@ async def selection_cb(client, cb: CallbackQuery):
     details = get_tmdb_details(media_type, int(mid))
     if not details: return await cb.message.edit_text("❌ Sorry, couldn't fetch details from TMDB.")
     
+    # Fix media type in details if missing
+    if 'media_type' not in details: details['media_type'] = media_type
+
     uid = cb.from_user.id
-    if uid not in user_conversations:
-        user_conversations[uid] = {}
-        
-    user_conversations[uid].update({"flow": flow, "details": details, "links": {}, "state": ""})
+    user_conversations[uid] = {"details": details, "links": {}, "state": ""}
     
     if media_type == "tv":
         user_conversations[uid]["state"] = "wait_tv_lang"
@@ -629,6 +662,156 @@ async def selection_cb(client, cb: CallbackQuery):
     elif media_type == "movie":
         user_conversations[uid]["state"] = "wait_movie_lang"
         await cb.message.edit_text("**Movie Post:** Enter the language for the movie.")
+
+# --- UPDATE: Unified Conversation Handler (Manual + TMDB + Series Quality) ---
+@bot.on_message(filters.private & (filters.text | filters.photo))
+@force_subscribe
+async def conversation_handler(client, message: Message):
+    uid = message.from_user.id
+    convo = user_conversations.get(uid)
+    if not convo or "state" not in convo: return
+    
+    state = convo["state"]
+    text = message.text.strip() if message.text else None
+    
+    # ==========================
+    # 1. MANUAL ENTRY STATES
+    # ==========================
+    if state == "wait_manual_title":
+        convo["details"]["title"] = text
+        convo["details"]["name"] = text # Backup for TV
+        convo["state"] = "wait_manual_year"
+        await message.reply_text("✅ Title set. Now send the **Year** (e.g. 2025):")
+
+    elif state == "wait_manual_year":
+        # Create a fake date format for compatibility
+        convo["details"]["release_date"] = f"{text}-01-01"
+        convo["details"]["first_air_date"] = f"{text}-01-01"
+        convo["state"] = "wait_manual_rating"
+        await message.reply_text("✅ Year set. Now send the **Rating** (e.g. 7.5):")
+
+    elif state == "wait_manual_rating":
+        try:
+            rating = float(text)
+        except ValueError:
+            rating = 0.0
+        convo["details"]["vote_average"] = rating
+        convo["state"] = "wait_manual_genres"
+        await message.reply_text("✅ Rating set. Now send the **Genres** (e.g. Action, Drama, Thriller):")
+
+    elif state == "wait_manual_genres":
+        convo["details"]["genres"] = text # Store as string
+        convo["state"] = "wait_manual_poster"
+        await message.reply_text("✅ Genres set. Now **Send a Photo** to use as the Poster:")
+
+    elif state == "wait_manual_poster":
+        if not message.photo:
+            return await message.reply_text("⚠️ Please send an image (Photo), not a file.")
+        
+        msg = await message.reply_text("📥 Downloading poster...")
+        photo = await client.download_media(message, in_memory=True)
+        convo["details"]["poster_bytes"] = photo # Store BytesIO
+        
+        # Branch to Movie/TV logic
+        if convo["details"]["media_type"] == "tv":
+            convo["state"] = "wait_tv_lang"
+            await msg.edit_text("✅ Poster saved.\n\n**Web Series:** Enter the language (e.g. English, Hindi):")
+        else:
+            convo["state"] = "wait_movie_lang"
+            await msg.edit_text("✅ Poster saved.\n\n**Movie:** Enter the language:")
+
+    # ==========================
+    # 2. MOVIE LINK STATES
+    # ==========================
+    elif state == "wait_movie_lang":
+        convo["language"] = text; convo["state"] = "wait_480p"
+        await message.reply_text("✅ Language set. Now send the **480p** link or type `skip`.")
+    
+    elif state == "wait_480p":
+        if text.lower() != 'skip':
+            s_msg = await message.reply("🔗 Shortening link...", quote=True)
+            link = await shorten_link(uid, text)
+            convo["links"]["480p"] = link
+            await s_msg.delete()
+        convo["state"] = "wait_720p"
+        await message.reply_text("✅ Saved. Now send the **720p** link or type `skip`.")
+
+    elif state == "wait_720p":
+        if text.lower() != 'skip':
+            s_msg = await message.reply("🔗 Shortening link...", quote=True)
+            link = await shorten_link(uid, text)
+            convo["links"]["720p"] = link
+            await s_msg.delete()
+        convo["state"] = "wait_1080p"
+        await message.reply_text("✅ Saved. Now send the **1080p** link or type `skip`.")
+
+    elif state == "wait_1080p":
+        if text.lower() != 'skip':
+            s_msg = await message.reply("🔗 Shortening link...", quote=True)
+            link = await shorten_link(uid, text)
+            convo["links"]["1080p"] = link
+            await s_msg.delete()
+        
+        msg = await message.reply_text("✅ All data collected! Generating preview...")
+        await generate_final_post_preview(client, uid, message.chat.id, msg)
+
+    # ==========================
+    # 3. SERIES LINK STATES (UPDATED)
+    # ==========================
+    elif state == "wait_tv_lang":
+        convo["language"] = text; convo["state"] = "wait_season_number"
+        await message.reply_text("✅ Language set. Now enter the **Season Number** (e.g., 1, 2).")
+
+    elif state == "wait_season_number":
+        if text.lower() == 'done':
+            if not convo.get('links'): return await message.reply_text("⚠️ You haven't added any season links.")
+            msg = await message.reply_text("✅ All season data collected! Generating preview...", quote=True)
+            await generate_final_post_preview(client, uid, message.chat.id, msg)
+            return
+        
+        if not text.isdigit() or int(text) <= 0:
+            return await message.reply_text("❌ Invalid number. Please enter a valid season number (e.g., 1).")
+        
+        convo['current_season'] = text
+        
+        # Initialize season dict if not exists
+        if 'links' not in convo: convo['links'] = {}
+        if text not in convo['links']: convo['links'][text] = {}
+
+        convo['state'] = 'wait_season_480'
+        await message.reply_text(f"👍 **Season {text}** selected.\n\nSend the **480p** link for Season {text} (or type `skip`).")
+
+    # --- Season Qualities Loop ---
+    elif state == "wait_season_480":
+        s_num = convo['current_season']
+        if text.lower() != 'skip':
+            s_msg = await message.reply("🔗 Shortening...", quote=True)
+            link = await shorten_link(uid, text)
+            convo['links'][s_num]['480p'] = link
+            await s_msg.delete()
+        convo['state'] = 'wait_season_720'
+        await message.reply_text(f"Send the **720p** link for Season {s_num} (or type `skip`).")
+
+    elif state == "wait_season_720":
+        s_num = convo['current_season']
+        if text.lower() != 'skip':
+            s_msg = await message.reply("🔗 Shortening...", quote=True)
+            link = await shorten_link(uid, text)
+            convo['links'][s_num]['720p'] = link
+            await s_msg.delete()
+        convo['state'] = 'wait_season_1080'
+        await message.reply_text(f"Send the **1080p** link for Season {s_num} (or type `skip`).")
+
+    elif state == "wait_season_1080":
+        s_num = convo['current_season']
+        if text.lower() != 'skip':
+            s_msg = await message.reply("🔗 Shortening...", quote=True)
+            link = await shorten_link(uid, text)
+            convo['links'][s_num]['1080p'] = link
+            await s_msg.delete()
+        
+        convo['state'] = 'wait_season_number'
+        await message.reply_text(f"✅ Season {s_num} links saved.\n\n**👉 Enter the next Season Number (e.g. 2), or type `done` to finish.**")
 
 @bot.on_callback_query(filters.regex("^postto_"))
 async def post_to_channel_cb(client, cb: CallbackQuery):
@@ -644,15 +827,15 @@ async def post_to_channel_cb(client, cb: CallbackQuery):
     
     final_post = convo['final_post']
     caption = final_post['caption']
-    poster = final_post['poster']
+    poster_buffer = final_post['poster']
 
     try:
         chat = await client.get_chat(int(channel_id))
         channel_name = chat.title
 
-        if poster:
-            poster.seek(0)
-            await client.send_photo(chat_id=int(channel_id), photo=poster, caption=caption, parse_mode=enums.ParseMode.MARKDOWN)
+        if poster_buffer:
+            poster_buffer.seek(0)
+            await client.send_photo(chat_id=int(channel_id), photo=poster_buffer, caption=caption, parse_mode=enums.ParseMode.MARKDOWN)
         else:
             await client.send_message(chat_id=int(channel_id), text=caption, parse_mode=enums.ParseMode.MARKDOWN)
         

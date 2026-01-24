@@ -72,6 +72,22 @@ def download_cascade():
             return None
     return cascade_file
 
+# [UPDATE 1] Helper to download Bengali Font if not present
+def download_font():
+    font_file = "HindSiliguri-Bold.ttf"
+    if not os.path.exists(font_file):
+        logger.info(f"Downloading {font_file} for badge text...")
+        url = "https://github.com/google/fonts/raw/main/ofl/hindsiliguri/HindSiliguri-Bold.ttf"
+        try:
+            r = requests.get(url, timeout=20)
+            r.raise_for_status()
+            with open(font_file, 'wb') as f:
+                f.write(r.content)
+        except Exception as e:
+            logger.error(f"Could not download font file. Error: {e}")
+            return None
+    return font_file
+
 # --- DATABASE & PREMIUM HELPERS ---
 
 async def add_user_to_db(user):
@@ -161,11 +177,14 @@ def search_tmdb_by_imdb(imdb_id: str):
     except Exception:
         return []
 
+# [UPDATE 2] Added &include_adult=true to enable 18+ content
 def search_tmdb(query: str):
     year, name = None, query.strip()
     match = re.search(r'(.+?)\s*\(?(\d{4})\)?$', query)
     if match: name, year = match.group(1).strip(), match.group(2)
-    url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={name}" + (f"&year={year}" if year else "")
+    
+    # URL Updated to include adult content
+    url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={name}&include_adult=true" + (f"&year={year}" if year else "")
     try:
         r = requests.get(url, timeout=10); r.raise_for_status()
         return [res for res in r.json().get("results", []) if res.get("media_type") in ["movie", "tv"]][:5]
@@ -179,6 +198,7 @@ def get_tmdb_details(media_type: str, media_id: int):
     except Exception:
         return None
 
+# [UPDATE 3] Updated watermark_poster to use correct Bengali font
 def watermark_poster(poster_input, watermark_text: str, badge_text: str = None):
     # poster_input can be a String (URL) or BytesIO (File)
     if not poster_input: return None, "Poster not found."
@@ -196,8 +216,14 @@ def watermark_poster(poster_input, watermark_text: str, badge_text: str = None):
         # ---- Badge Text Logic ----
         if badge_text:
             badge_font_size = int(img.width / 9)
+            
+            # Download and use Bengali Font
+            font_path = download_font()
             try:
-                badge_font = ImageFont.truetype("HindSiliguri-Bold.ttf", badge_font_size)
+                if font_path:
+                    badge_font = ImageFont.truetype(font_path, badge_font_size)
+                else:
+                    badge_font = ImageFont.load_default()
             except IOError:
                 badge_font = ImageFont.load_default()
 
@@ -232,7 +258,7 @@ def watermark_poster(poster_input, watermark_text: str, badge_text: str = None):
             img = Image.alpha_composite(img, rect_layer)
             draw = ImageDraw.Draw(img)
 
-            gradient = Image.new('RGBA', (text_width, text_height), (0, 0, 0, 0))
+            gradient = Image.new('RGBA', (text_width, text_height + int(padding)), (0, 0, 0, 0))
             gradient_draw = ImageDraw.Draw(gradient)
             
             gradient_start_color = (255, 255, 0)
@@ -242,18 +268,25 @@ def watermark_poster(poster_input, watermark_text: str, badge_text: str = None):
                 r = int(gradient_start_color[0] * (1 - ratio) + gradient_end_color[0] * ratio)
                 g = int(gradient_start_color[1] * (1 - ratio) + gradient_end_color[1] * ratio)
                 b = int(gradient_start_color[2] * (1 - ratio) + gradient_end_color[2] * ratio)
-                gradient_draw.line([(i, 0), (i, text_height)], fill=(r, g, b, 255))
+                gradient_draw.line([(i, 0), (i, text_height + padding)], fill=(r, g, b, 255))
             
-            mask = Image.new('L', (text_width, text_height), 0)
+            mask = Image.new('L', (text_width, text_height + int(padding)), 0)
             mask_draw = ImageDraw.Draw(mask)
-            mask_draw.text((-bbox[0], -bbox[1]), badge_text, font=badge_font, fill=255)
-            img.paste(gradient, (int(x), int(y)), mask)
+            mask_draw.text((0, 0), badge_text, font=badge_font, fill=255)
+            
+            try:
+                img.paste(gradient, (int(x), int(y)), mask)
+            except ValueError:
+                # Fallback if mask size mismatch due to font issues
+                draw.text((x, y), badge_text, font=badge_font, fill="white")
 
         # ---- Watermark Logic ----
         if watermark_text:
             font_size = int(img.width / 12)
             try:
-                font = ImageFont.truetype("Poppins-Bold.ttf", font_size)
+                # Reuse the downloaded font for watermark too for consistency
+                font_path = download_font()
+                font = ImageFont.truetype(font_path, font_size) if font_path else ImageFont.load_default()
             except IOError:
                 font = ImageFont.load_default()
             

@@ -28,7 +28,7 @@ TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 FORCE_SUB_CHANNEL = os.getenv("FORCE_SUB_CHANNEL")
 INVITE_LINK = os.getenv("INVITE_LINK")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-LOG_CHANNEL = os.getenv("LOG_CHANNEL") # New: লগ চ্যানেলের আইডি (.env তে অ্যাড করবেন)
+LOG_CHANNEL = os.getenv("LOG_CHANNEL") # .env ফাইলে এটি যুক্ত করুন
 
 # ⭐️ Setup basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -45,7 +45,7 @@ if not DB_URI:
 db_client = motor.motor_asyncio.AsyncIOMotorClient(DB_URI)
 db = db_client[DB_NAME]
 users_collection = db.users
-settings_collection = db.settings # New collection for settings
+settings_collection = db.settings
 
 # ---- Global Variables & Bot Initialization ----
 user_conversations = {}
@@ -196,13 +196,12 @@ def get_tmdb_details(media_type: str, media_id: int):
     except Exception:
         return None
 
-# ---- 🎨 ADVANCED POSTER GENERATION (CINEMATIC LOOK) ----
+# ---- 🎨 CINEMATIC POSTER GENERATOR ----
 
 def create_gradient_overlay(width, height):
     """পোস্টারের নিচে কালো শ্যাডো তৈরি করা"""
     gradient = Image.new('RGBA', (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(gradient)
-    # লুপ চালিয়ে ধীরে ধীরে কালো রঙ বাড়ানো
     for i in range(height):
         if i > height * 0.6: # নিচের 40% অংশ
             alpha = int(255 * ((i - height * 0.6) / (height * 0.4)))
@@ -212,14 +211,13 @@ def create_gradient_overlay(width, height):
 def watermark_poster(poster_input, watermark_text: str, badge_text: str = None, movie_title: str = "", rating: str = ""):
     if not poster_input: return None, "Poster not found."
     try:
-        # ১. ইমেজ লোড করা
         if isinstance(poster_input, str):
             img_data = requests.get(poster_input, timeout=20).content
             original_img = Image.open(io.BytesIO(img_data)).convert("RGBA")
         else:
             original_img = Image.open(poster_input).convert("RGBA")
         
-        # ইমেজের সাইজ স্ট্যান্ডার্ড করা (High Quality)
+        # High Quality Resize
         base_width = 1200
         w_percent = (base_width / float(original_img.size[0]))
         h_size = int((float(original_img.size[1]) * float(w_percent)))
@@ -228,53 +226,38 @@ def watermark_poster(poster_input, watermark_text: str, badge_text: str = None, 
         draw = ImageDraw.Draw(img)
         font_path = download_font()
         
-        # ২. সিনেমাটিক গ্রেডিয়েন্ট (নিচে কালো শেড)
+        # Gradient
         gradient = create_gradient_overlay(img.width, img.height)
         img = Image.alpha_composite(img, gradient)
-        draw = ImageDraw.Draw(img) # ড্রয়ার রিফ্রেশ
+        draw = ImageDraw.Draw(img)
 
-        # ৩. মুভির টাইটেল এবং রেটিং ছবির ওপরেই লেখা (Cinematic Style)
+        # Title & Rating
         if movie_title:
             try:
-                # ফন্ট সাইজ ডাইনামিক
-                title_font_size = 75
-                if len(movie_title) > 20: title_font_size = 60
-                
+                title_font_size = 75 if len(movie_title) <= 20 else 60
                 title_font = ImageFont.truetype(font_path, title_font_size) if font_path else ImageFont.load_default()
                 meta_font = ImageFont.truetype(font_path, 45) if font_path else ImageFont.load_default()
             except:
-                title_font = ImageFont.load_default()
-                meta_font = ImageFont.load_default()
+                title_font = ImageFont.load_default(); meta_font = ImageFont.load_default()
 
-            text_x = 50
-            text_y = img.height - 180
-            
-            # Text Shadow (কালো বর্ডার টাইটেলের জন্য)
-            draw.text((text_x+3, text_y+3), movie_title, font=title_font, fill="black")
+            text_x, text_y = 50, img.height - 180
+            draw.text((text_x+3, text_y+3), movie_title, font=title_font, fill="black") # Shadow
             draw.text((text_x, text_y), movie_title, font=title_font, fill="white")
             
-            # রেটিং এবং ওয়াটারমার্ক নিচে
             sub_text = f"⭐ {rating}/10  |  {watermark_text or 'MovieBot'}"
-            draw.text((text_x, text_y + 85), sub_text, font=meta_font, fill="#FFD700") # গোল্ডেন কালার
+            draw.text((text_x, text_y + 85), sub_text, font=meta_font, fill="#FFD700")
 
-        # ৪. কাস্টম ব্যাজ (Top Right Corner)
+        # Top Right Badge
         if badge_text:
-            badge_font_size = 50
             try:
-                badge_font = ImageFont.truetype(font_path, badge_font_size) if font_path else ImageFont.load_default()
-            except:
-                badge_font = ImageFont.load_default()
+                badge_font = ImageFont.truetype(font_path, 50) if font_path else ImageFont.load_default()
+            except: badge_font = ImageFont.load_default()
             
             bbox = draw.textbbox((0, 0), badge_text, font=badge_font)
-            bw = bbox[2] - bbox[0] + 50
-            bh = bbox[3] - bbox[1] + 30
+            bw, bh = bbox[2] - bbox[0] + 50, bbox[3] - bbox[1] + 30
+            bx, by = img.width - bw - 40, 40
             
-            bx = img.width - bw - 40
-            by = 40
-            
-            # লাল সুন্দর রাউন্ড বক্স
             draw.rounded_rectangle([(bx, by), (bx + bw, by + bh)], radius=20, fill=(220, 20, 60, 240))
-            
             text_x = bx + (bw - (bbox[2] - bbox[0])) / 2
             text_y = by + (bh - (bbox[3] - bbox[1])) / 2 - 8
             draw.text((text_x, text_y), badge_text, font=badge_font, fill="white")
@@ -284,23 +267,19 @@ def watermark_poster(poster_input, watermark_text: str, badge_text: str = None, 
         img.convert("RGB").save(buffer, "PNG")
         buffer.seek(0)
         return buffer, None
-
     except Exception as e:
         return None, f"Image processing error: {e}"
 
+# ---- 📝 DYNAMIC CAPTION GENERATOR ----
+
 async def generate_channel_caption(data: dict, language: str, links: dict, user_data: dict):
-    # স্টোরিলাইন ছোট করা
+    # Info
     overview = data.get("overview", "")
     if len(overview) > 200: overview = overview[:200] + "..."
     if not overview: overview = "No synopsis available."
 
-    if isinstance(data.get("genres"), list) and len(data["genres"]) > 0:
-        genre_str = " | ".join([g["name"] for g in data.get("genres", [])[:3]])
-    else:
-        genre_str = str(data.get("genres", "N/A"))
-
-    date = data.get("release_date") or data.get("first_air_date") or "----"
-    year = date[:4]
+    genre_str = " | ".join([g["name"] for g in data.get("genres", [])[:3]]) if isinstance(data.get("genres"), list) else "N/A"
+    year = (data.get("release_date") or data.get("first_air_date") or "----")[:4]
     
     caption = f"""
 🎬 **{data.get('title') or data.get('name')}** ({year})
@@ -316,7 +295,14 @@ _{overview}_
 👇 **DOWNLOAD LINKS** 👇
 """
     
-    download_links = ""
+    # Style Logic
+    style = user_data.get('link_style', '1') if user_data else '1'
+    def format_link(quality, url, s_type):
+        if s_type == '2': return f"📥 **{quality}** [{url}]"
+        elif s_type == '3': return f"🔘 **[{quality} Quality]({url})**"
+        elif s_type == '4': return f"⚡ **[{quality}]({url})**"
+        else: return f"🔹 **[Download {quality}]({url})**"
+
     if data.get('media_type') == 'tv':
         if links:
             try: sorted_seasons = sorted(links.keys(), key=lambda x: int(x))
@@ -327,18 +313,20 @@ _{overview}_
                 caption += f"\n📂 **Season {season_num}**\n"
                 if isinstance(season_data, dict):
                     parts = []
-                    if season_data.get('480p'): parts.append(f"[{season_data['480p']}](480p)")
-                    if season_data.get('720p'): parts.append(f"[{season_data['720p']}](720p)")
-                    if season_data.get('1080p'): parts.append(f"[{season_data['1080p']}](1080p)")
-                    if parts: caption += " | ".join(parts).replace("](", "](") # Just text formatting
-                    else: caption += "Links adding soon..."
+                    join_char = " | " if style in ['3', '4'] else "\n"
+                    if season_data.get('480p'): parts.append(format_link("480p", season_data['480p'], style))
+                    if season_data.get('720p'): parts.append(format_link("720p", season_data['720p'], style))
+                    if season_data.get('1080p'): parts.append(format_link("1080p", season_data['1080p'], style))
+                    
+                    if parts: caption += join_char.join(parts)
+                    else: caption += "Links coming soon..."
                 else:
                     caption += f"✅ [Download Season]({season_data})"
     else:
         movie_links = []
-        if links.get('480p'): movie_links.append(f"🔹 [480p Quality]({links['480p']})")
-        if links.get('720p'): movie_links.append(f"🔹 [720p Quality]({links['720p']})")
-        if links.get('1080p'): movie_links.append(f"🔹 [1080p Quality]({links['1080p']})")
+        if links.get('480p'): movie_links.append(format_link("480p", links['480p'], style))
+        if links.get('720p'): movie_links.append(format_link("720p", links['720p'], style))
+        if links.get('1080p'): movie_links.append(format_link("1080p", links['1080p'], style))
         caption += "\n".join(movie_links)
 
     static_footer = """
@@ -419,6 +407,26 @@ async def menu_callbacks(client, cb: CallbackQuery):
             await cb.message.edit_text("➖ **Remove Premium**\nSend User ID.")
             user_conversations[uid] = {"state": "admin_rem_prem_wait", "is_manual": False}
 
+# --- SETTINGS & STYLE HANDLERS ---
+
+@bot.on_message(filters.command("setstyle") & filters.private)
+@force_subscribe
+@check_premium
+async def set_link_style(client, message: Message):
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Style 1: [Download 720p]", callback_data="style_1")],
+        [InlineKeyboardButton("Style 2: 📥 720p [Link]", callback_data="style_2")],
+        [InlineKeyboardButton("Style 3: 🔘 720p Quality", callback_data="style_3")],
+        [InlineKeyboardButton("Style 4: ⚡ 720p (Fast)", callback_data="style_4")]
+    ])
+    await message.reply_text("🎨 **Choose Link Style:**", reply_markup=buttons)
+
+@bot.on_callback_query(filters.regex(r"^style_"))
+async def save_link_style(client, cb: CallbackQuery):
+    style_id = cb.data.split("_")[1]
+    await users_collection.update_one({'_id': cb.from_user.id}, {'$set': {'link_style': style_id}}, upsert=True)
+    await cb.message.edit_text(f"✅ **Link Style Set to:** Style {style_id}")
+
 @bot.on_message(filters.command(["setwatermark", "cancel", "setapi", "setdomain", "settutorial", "settings", "badge"]) & filters.private)
 @force_subscribe
 @check_premium
@@ -461,7 +469,8 @@ async def settings_commands(client, message: Message):
     elif command == "settings":
         user_data = await users_collection.find_one({'_id': uid})
         if not user_data: return await message.reply_text("No settings saved.")
-        await message.reply_text(f"**Settings:**\nWatermark: `{user_data.get('watermark_text', 'Not Set')}`\nDomain: `{user_data.get('shortener_url', 'Not Set')}`")
+        style = user_data.get('link_style', '1')
+        await message.reply_text(f"**Settings:**\nWatermark: `{user_data.get('watermark_text', 'Not Set')}`\nStyle: `Style {style}`")
 
 @bot.on_message(filters.command(["addchannel", "delchannel", "mychannels"]) & filters.private)
 @force_subscribe
@@ -510,7 +519,6 @@ async def generate_final_post_preview(client, uid, cid, msg):
     watermark = user_data.get('watermark_text')
     badge = convo.get('temp_badge_text', None)
     
-    # টাইটেল এবং রেটিং বের করা (Cinematic Poster এর জন্য)
     m_title = convo["details"].get("title") or convo["details"].get("name")
     m_rating = f"{convo['details'].get('vote_average', 0):.1f}"
 
@@ -519,11 +527,10 @@ async def generate_final_post_preview(client, uid, cid, msg):
         poster_input = convo['details']['poster_bytes']
         poster_input.seek(0)
     elif convo['details'].get('poster_path'):
-        poster_input = f"https://image.tmdb.org/t/p/w780{convo['details']['poster_path']}" # High Res
+        poster_input = f"https://image.tmdb.org/t/p/w780{convo['details']['poster_path']}"
     
     await msg.edit_text("🖼️ Creating cinematic poster...")
     
-    # 🆕 Updated Function Call
     poster, error = watermark_poster(poster_input, watermark, badge_text=badge, movie_title=m_title, rating=m_rating)
     
     await msg.delete()

@@ -8,6 +8,7 @@ import requests
 import asyncio
 from threading import Thread
 import logging
+import time
 
 # --- Third-party Library Imports ---
 from PIL import Image, ImageDraw, ImageFont
@@ -17,8 +18,6 @@ from pyrogram.errors import UserNotParticipant, FloodWait
 from flask import Flask
 from dotenv import load_dotenv
 import motor.motor_asyncio
-import numpy as np
-import cv2  # OpenCV for Face Detection
 
 # ---- 1. CONFIGURATION AND SETUP ----
 load_dotenv()
@@ -29,6 +28,7 @@ TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 FORCE_SUB_CHANNEL = os.getenv("FORCE_SUB_CHANNEL")
 INVITE_LINK = os.getenv("INVITE_LINK")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+LOG_CHANNEL = os.getenv("LOG_CHANNEL") # New: লগ চ্যানেলের আইডি (.env তে অ্যাড করবেন)
 
 # ⭐️ Setup basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -37,12 +37,15 @@ logger = logging.getLogger(__name__)
 # ---- ✨ MongoDB Database Setup ✨ ----
 DB_URI = os.getenv("DATABASE_URI")
 DB_NAME = os.getenv("DATABASE_NAME", "MovieBotDB")
+
 if not DB_URI:
     logger.critical("CRITICAL: DATABASE_URI is not set. Bot cannot start without a database.")
     exit()
+
 db_client = motor.motor_asyncio.AsyncIOMotorClient(DB_URI)
 db = db_client[DB_NAME]
 users_collection = db.users
+settings_collection = db.settings # New collection for settings
 
 # ---- Global Variables & Bot Initialization ----
 user_conversations = {}
@@ -55,21 +58,6 @@ def home(): return "✅ Bot is Running!"
 Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080))), daemon=True).start()
 
 # ---- 2. DECORATORS AND HELPER FUNCTIONS ----
-
-def download_cascade():
-    cascade_file = "haarcascade_frontalface_default.xml"
-    if not os.path.exists(cascade_file):
-        logger.info(f"Downloading {cascade_file} for face detection...")
-        url = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
-        try:
-            r = requests.get(url, timeout=20)
-            r.raise_for_status()
-            with open(cascade_file, 'wb') as f:
-                f.write(r.content)
-        except Exception as e:
-            logger.error(f"Could not download cascade file. Error: {e}")
-            return None
-    return cascade_file
 
 def download_font():
     font_file = "HindSiliguri-Bold.ttf"
@@ -86,14 +74,30 @@ def download_font():
             return None
     return font_file
 
-# --- DATABASE & PREMIUM HELPERS ---
+# --- ADMIN & LOGGING HELPERS ---
+
+async def log_event(text):
+    """লগ চ্যানেলে ইভেন্ট সেন্ড করা"""
+    if LOG_CHANNEL:
+        try:
+            await bot.send_message(int(LOG_CHANNEL), f"🔔 **LOG:**\n{text}")
+        except Exception as e:
+            logger.error(f"Log Error: {e}")
+
+async def auto_delete_message(client, chat_id, message_id, delay=300):
+    """নির্দিষ্ট সময় পর মেসেজ ডিলিট করা"""
+    await asyncio.sleep(delay)
+    try:
+        await client.delete_messages(chat_id, message_id)
+    except:
+        pass
 
 async def add_user_to_db(user):
     await users_collection.update_one(
         {'_id': user.id},
         {
-            '$set': {'first_name': user.first_name},
-            '$setOnInsert': {'is_premium': False} 
+            '$set': {'first_name': user.first_name, 'username': user.username},
+            '$setOnInsert': {'is_premium': False, 'join_date': time.time()} 
         },
         upsert=True
     )
@@ -128,7 +132,7 @@ def check_premium(func):
         else:
             await message.reply_text(
                 "⛔ **Access Denied!**\n\n"
-                "This is a **Premium Feature**. You need to buy a subscription to use this bot.\n\n"
+                "This is a **Premium Feature**. You need to buy a subscription.\n\n"
                 "👉 Contact Admin to buy Premium.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("👑 Contact Admin", user_id=OWNER_ID)]
@@ -178,7 +182,6 @@ def search_tmdb(query: str):
     match = re.search(r'(.+?)\s*\(?(\d{4})\)?$', query)
     if match: name, year = match.group(1).strip(), match.group(2)
     
-    # Updated URL to include adult content
     url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={name}&include_adult=true" + (f"&year={year}" if year else "")
     try:
         r = requests.get(url, timeout=10); r.raise_for_status()
@@ -193,187 +196,165 @@ def get_tmdb_details(media_type: str, media_id: int):
     except Exception:
         return None
 
-def watermark_poster(poster_input, watermark_text: str, badge_text: str = None):
+# ---- 🎨 ADVANCED POSTER GENERATION (CINEMATIC LOOK) ----
+
+def create_gradient_overlay(width, height):
+    """পোস্টারের নিচে কালো শ্যাডো তৈরি করা"""
+    gradient = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(gradient)
+    # লুপ চালিয়ে ধীরে ধীরে কালো রঙ বাড়ানো
+    for i in range(height):
+        if i > height * 0.6: # নিচের 40% অংশ
+            alpha = int(255 * ((i - height * 0.6) / (height * 0.4)))
+            draw.line([(0, i), (width, i)], fill=(0, 0, 0, alpha))
+    return gradient
+
+def watermark_poster(poster_input, watermark_text: str, badge_text: str = None, movie_title: str = "", rating: str = ""):
     if not poster_input: return None, "Poster not found."
     try:
+        # ১. ইমেজ লোড করা
         if isinstance(poster_input, str):
             img_data = requests.get(poster_input, timeout=20).content
             original_img = Image.open(io.BytesIO(img_data)).convert("RGBA")
         else:
             original_img = Image.open(poster_input).convert("RGBA")
         
-        img = Image.new("RGBA", original_img.size)
-        img.paste(original_img)
+        # ইমেজের সাইজ স্ট্যান্ডার্ড করা (High Quality)
+        base_width = 1200
+        w_percent = (base_width / float(original_img.size[0]))
+        h_size = int((float(original_img.size[1]) * float(w_percent)))
+        img = original_img.resize((base_width, h_size), Image.Resampling.LANCZOS)
+        
         draw = ImageDraw.Draw(img)
+        font_path = download_font()
+        
+        # ২. সিনেমাটিক গ্রেডিয়েন্ট (নিচে কালো শেড)
+        gradient = create_gradient_overlay(img.width, img.height)
+        img = Image.alpha_composite(img, gradient)
+        draw = ImageDraw.Draw(img) # ড্রয়ার রিফ্রেশ
 
-        # ---- Badge Text Logic ----
+        # ৩. মুভির টাইটেল এবং রেটিং ছবির ওপরেই লেখা (Cinematic Style)
+        if movie_title:
+            try:
+                # ফন্ট সাইজ ডাইনামিক
+                title_font_size = 75
+                if len(movie_title) > 20: title_font_size = 60
+                
+                title_font = ImageFont.truetype(font_path, title_font_size) if font_path else ImageFont.load_default()
+                meta_font = ImageFont.truetype(font_path, 45) if font_path else ImageFont.load_default()
+            except:
+                title_font = ImageFont.load_default()
+                meta_font = ImageFont.load_default()
+
+            text_x = 50
+            text_y = img.height - 180
+            
+            # Text Shadow (কালো বর্ডার টাইটেলের জন্য)
+            draw.text((text_x+3, text_y+3), movie_title, font=title_font, fill="black")
+            draw.text((text_x, text_y), movie_title, font=title_font, fill="white")
+            
+            # রেটিং এবং ওয়াটারমার্ক নিচে
+            sub_text = f"⭐ {rating}/10  |  {watermark_text or 'MovieBot'}"
+            draw.text((text_x, text_y + 85), sub_text, font=meta_font, fill="#FFD700") # গোল্ডেন কালার
+
+        # ৪. কাস্টম ব্যাজ (Top Right Corner)
         if badge_text:
-            badge_font_size = int(img.width / 9)
-            font_path = download_font()
+            badge_font_size = 50
             try:
                 badge_font = ImageFont.truetype(font_path, badge_font_size) if font_path else ImageFont.load_default()
-            except IOError:
+            except:
                 badge_font = ImageFont.load_default()
-
+            
             bbox = draw.textbbox((0, 0), badge_text, font=badge_font)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-            x = (img.width - text_width) / 2
+            bw = bbox[2] - bbox[0] + 50
+            bh = bbox[3] - bbox[1] + 30
             
-            # Face Detection
-            y_pos = img.height * 0.03
-            cascade_path = download_cascade()
-            if cascade_path:
-                try:
-                    cv_image = np.array(original_img.convert('RGB'))
-                    gray = cv2.cvtColor(cv_image, cv2.COLOR_RGB2GRAY)
-                    face_cascade = cv2.CascadeClassifier(cascade_path)
-                    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-                    
-                    padding = int(badge_font_size * 0.2)
-                    text_box_y1 = y_pos + text_height + padding
-                    is_collision = any(y_pos < (fy + fh) and text_box_y1 > fy for (fx, fy, fw, fh) in faces)
-                    
-                    if is_collision:
-                        y_pos = img.height * 0.25
-                except Exception: pass
+            bx = img.width - bw - 40
+            by = 40
+            
+            # লাল সুন্দর রাউন্ড বক্স
+            draw.rounded_rectangle([(bx, by), (bx + bw, by + bh)], radius=20, fill=(220, 20, 60, 240))
+            
+            text_x = bx + (bw - (bbox[2] - bbox[0])) / 2
+            text_y = by + (bh - (bbox[3] - bbox[1])) / 2 - 8
+            draw.text((text_x, text_y), badge_text, font=badge_font, fill="white")
 
-            y = y_pos
-            padding = int(badge_font_size * 0.15)
-            rect_layer = Image.new('RGBA', img.size, (0, 0, 0, 0))
-            rect_draw = ImageDraw.Draw(rect_layer)
-            rect_draw.rectangle((x - padding, y - padding, x + text_width + padding, y + text_height + padding), fill=(0, 0, 0, 160))
-            img = Image.alpha_composite(img, rect_layer)
-            draw = ImageDraw.Draw(img)
-
-            gradient = Image.new('RGBA', (text_width, text_height + int(padding)), (0, 0, 0, 0))
-            gradient_draw = ImageDraw.Draw(gradient)
-            
-            gradient_start_color = (255, 255, 0)
-            gradient_end_color = (255, 69, 0)
-            for i in range(text_width):
-                ratio = i / text_width
-                r = int(gradient_start_color[0] * (1 - ratio) + gradient_end_color[0] * ratio)
-                g = int(gradient_start_color[1] * (1 - ratio) + gradient_end_color[1] * ratio)
-                b = int(gradient_start_color[2] * (1 - ratio) + gradient_end_color[2] * ratio)
-                gradient_draw.line([(i, 0), (i, text_height + padding)], fill=(r, g, b, 255))
-            
-            mask = Image.new('L', (text_width, text_height + int(padding)), 0)
-            mask_draw = ImageDraw.Draw(mask)
-            mask_draw.text((0, 0), badge_text, font=badge_font, fill=255)
-            
-            try:
-                img.paste(gradient, (int(x), int(y)), mask)
-            except ValueError:
-                draw.text((x, y), badge_text, font=badge_font, fill="white")
-
-        # ---- Watermark Logic ----
-        if watermark_text:
-            font_size = int(img.width / 12)
-            try:
-                font_path = download_font()
-                font = ImageFont.truetype(font_path, font_size) if font_path else ImageFont.load_default()
-            except IOError:
-                font = ImageFont.load_default()
-            
-            thumbnail = img.resize((150, 150))
-            colors = thumbnail.getcolors(150*150)
-            text_color = (255, 255, 255, 230)
-            if colors:
-                dominant_color = sorted(colors, key=lambda x: x[0], reverse=True)[0][1]
-                text_color = (255 - dominant_color[0], 255 - dominant_color[1], 255 - dominant_color[2], 230)
-
-            bbox = draw.textbbox((0, 0), watermark_text, font=font)
-            text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            wx = (img.width - text_width) / 2
-            wy = img.height - text_height - (img.height * 0.05)
-            draw.text((wx + 2, wy + 2), watermark_text, font=font, fill=(0, 0, 0, 128))
-            draw.text((wx, wy), watermark_text, font=font, fill=text_color)
-            
         buffer = io.BytesIO()
         buffer.name = "poster.png"
         img.convert("RGB").save(buffer, "PNG")
         buffer.seek(0)
         return buffer, None
+
     except Exception as e:
-        return None, f"Image processing error. Error: {e}"
+        return None, f"Image processing error: {e}"
 
 async def generate_channel_caption(data: dict, language: str, links: dict, user_data: dict):
-    # Determine Genre
+    # স্টোরিলাইন ছোট করা
+    overview = data.get("overview", "")
+    if len(overview) > 200: overview = overview[:200] + "..."
+    if not overview: overview = "No synopsis available."
+
     if isinstance(data.get("genres"), list) and len(data["genres"]) > 0:
-        genre_str = ", ".join([g["name"] for g in data.get("genres", [])[:3]]) if isinstance(data["genres"][0], dict) else str(data.get("genres"))
+        genre_str = " | ".join([g["name"] for g in data.get("genres", [])[:3]])
     else:
         genre_str = str(data.get("genres", "N/A"))
 
-    if data.get('media_type') == 'tv':
-        date = data.get("first_air_date") or "----"
-    else:
-        date = data.get("release_date") or "----"
+    date = data.get("release_date") or data.get("first_air_date") or "----"
+    year = date[:4]
+    
+    caption = f"""
+🎬 **{data.get('title') or data.get('name')}** ({year})
+➖➖➖➖➖➖➖➖➖➖➖
+⭐ **Rating:** {data.get('vote_average', 0):.1f}/10
+🎭 **Genre:** {genre_str}
+🔊 **Language:** {language}
+⏰ **Runtime:** {format_runtime(data.get("runtime", 0) if 'runtime' in data else (data.get("episode_run_time") or [0])[0])}
+➖➖➖➖➖➖➖➖➖➖➖
+📝 **Storyline:**
+_{overview}_
 
-    info = {
-        "title": data.get("title") or data.get("name") or "N/A",
-        "year": date[:4],
-        "genres": genre_str,
-        "rating": f"{data.get('vote_average', 0):.1f}",
-        "language": language,
-        "runtime": format_runtime(data.get("runtime", 0) if 'runtime' in data else (data.get("episode_run_time") or [0])[0]),
-    }
-
-    caption_header = f"""🎬 **{info['title']} ({info['year']})**
-━━━━━━━━━━━━━━━━━━━━━━━
-⭐ **Rating:** {info['rating']}/10
-🎭 **Genre:** {info['genres']}
-🔊 **Language:** {info['language']}
-⏰ **Runtime:** {info['runtime']}
-━━━━━━━━━━━━━━━━━━━━━━━"""
-
-    download_section_header = """👀 𝗪𝗔𝗧𝗖𝗛 𝗢𝗡𝗟𝗜𝗡𝗘/📤𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗
-👇  ℍ𝕚𝕘𝕙 𝕊𝕡𝕖𝕖𝕕 | ℕ𝕠 𝔹𝕦𝕗𝕗𝕖𝕣𝕚𝕟𝕘  👇"""
+👇 **DOWNLOAD LINKS** 👇
+"""
     
     download_links = ""
-    
     if data.get('media_type') == 'tv':
         if links:
             try: sorted_seasons = sorted(links.keys(), key=lambda x: int(x))
             except: sorted_seasons = links.keys()
 
-            season_lines = []
             for season_num in sorted_seasons:
                 season_data = links[season_num]
+                caption += f"\n📂 **Season {season_num}**\n"
                 if isinstance(season_data, dict):
                     parts = []
-                    if season_data.get('480p'): parts.append(f"**[480p]({season_data['480p']})**")
-                    if season_data.get('720p'): parts.append(f"**[720p]({season_data['720p']})**")
-                    if season_data.get('1080p'): parts.append(f"**[1080p]({season_data['1080p']})**")
-                    if parts:
-                        link_line = " | ".join(parts)
-                        season_lines.append(f"📂 **Season {season_num}:** {link_line}")
+                    if season_data.get('480p'): parts.append(f"[{season_data['480p']}](480p)")
+                    if season_data.get('720p'): parts.append(f"[{season_data['720p']}](720p)")
+                    if season_data.get('1080p'): parts.append(f"[{season_data['1080p']}](1080p)")
+                    if parts: caption += " | ".join(parts).replace("](", "](") # Just text formatting
+                    else: caption += "Links adding soon..."
                 else:
-                    season_lines.append(f"✅ **[Download Season {season_num}]({season_data})**")
-            download_links = "\n".join(season_lines)
+                    caption += f"✅ [Download Season]({season_data})"
     else:
         movie_links = []
-        if links.get('480p'): movie_links.append(f"**[Download 480p]({links['480p']})**")
-        if links.get('720p'): movie_links.append(f"**[Download 720p]({links['720p']})**")
-        if links.get('1080p'): movie_links.append(f"**[Download 1080p]({links['1080p']})**")
-        download_links = "\n\n".join(movie_links)
+        if links.get('480p'): movie_links.append(f"🔹 [480p Quality]({links['480p']})")
+        if links.get('720p'): movie_links.append(f"🔹 [720p Quality]({links['720p']})")
+        if links.get('1080p'): movie_links.append(f"🔹 [1080p Quality]({links['1080p']})")
+        caption += "\n".join(movie_links)
 
-    static_footer = """Movie ReQuest Group 
+    static_footer = """
+➖➖➖➖➖➖➖➖➖➖➖
+Movie ReQuest Group 
 👇👇👇
 https://t.me/Terabox_search_group
 
 Premium Backup Group link 👇👇👇
 https://t.me/+GL_XAS4MsJg4ODM1"""
 
-    caption_parts = [caption_header, download_section_header]
-    if download_links: caption_parts.append(download_links.strip())
-    
     if user_data and user_data.get('tutorial_link'):
-        tutorial_text = f"🎥 **How To Download:** **[Watch Tutorial]({user_data['tutorial_link']})**"
-        caption_parts.append(tutorial_text)
+        caption += f"\n\n🎥 **How To Download:** [Watch Tutorial]({user_data['tutorial_link']})"
     
-    caption_parts.append(static_footer)
-    return "\n\n".join(caption_parts)
+    caption += static_footer
+    return caption.strip()
 
 # ---- 4. BOT HANDLERS ----
 
@@ -420,7 +401,7 @@ async def menu_callbacks(client, cb: CallbackQuery):
         status = "Premium 💎" if await is_user_premium(uid) else "Free 👤"
         await cb.answer(f"User: {cb.from_user.first_name}\nID: {uid}\nStatus: {status}", show_alert=True)
     elif data == "help_guide":
-        text = "**📚 Bot Command Guide:**\n\nUse `/post` to start."
+        text = "**📚 Bot Command Guide:**\n\nUse `/post Movie Name` to start.\nUse `/settings` to configure."
         await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back_home")]]))
     elif data.startswith("admin_"):
         if uid != OWNER_ID: return await cb.answer("❌ You are not the Admin!", show_alert=True)
@@ -429,7 +410,7 @@ async def menu_callbacks(client, cb: CallbackQuery):
             prem = await users_collection.count_documents({'is_premium': True})
             await cb.answer(f"📊 Total Users: {total}\n💎 Premium Users: {prem}", show_alert=True)
         elif data == "admin_broadcast":
-            await cb.message.edit_text("📢 **Broadcast Mode**\nSend message to broadcast.")
+            await cb.message.edit_text("📢 **Broadcast Mode**\nSend message to broadcast.\n(Type `/pin` at start to pin message).")
             user_conversations[uid] = {"state": "admin_broadcast_wait", "is_manual": False}
         elif data == "admin_add_premium":
             await cb.message.edit_text("➕ **Add Premium**\nSend User ID.")
@@ -477,22 +458,10 @@ async def settings_commands(client, message: Message):
         else:
             await users_collection.update_one({'_id': uid}, {'$unset': {'tutorial_link': ""}}); await message.reply_text("✅ Tutorial link removed.")
 
-    elif command == "badge":
-        # Kept for backward compatibility, but UI flow is main now
-        if len(message.command) > 1:
-            badge_text = " ".join(message.command[1:])
-            if uid not in user_conversations: user_conversations[uid] = {}
-            user_conversations[uid]['temp_badge_text'] = badge_text
-            await message.reply_text(f"✅ Badge set: `{badge_text}` (Will be used if you don't skip in menu).")
-        else:
-            if uid in user_conversations and 'temp_badge_text' in user_conversations[uid]:
-                del user_conversations[uid]['temp_badge_text']
-            await message.reply_text("✅ Badge text removed.")
-
     elif command == "settings":
         user_data = await users_collection.find_one({'_id': uid})
         if not user_data: return await message.reply_text("No settings saved.")
-        await message.reply_text(f"**Settings:**\nWatermark: `{user_data.get('watermark_text', 'Not Set')}`")
+        await message.reply_text(f"**Settings:**\nWatermark: `{user_data.get('watermark_text', 'Not Set')}`\nDomain: `{user_data.get('shortener_url', 'Not Set')}`")
 
 @bot.on_message(filters.command(["addchannel", "delchannel", "mychannels"]) & filters.private)
 @force_subscribe
@@ -517,7 +486,8 @@ async def channel_management(client, message: Message):
         channels = user_data.get('channel_ids', [])
         await message.reply_text("📋 **Channels:**\n" + "\n".join([f"`{ch}`" for ch in channels]) if channels else "No channels set.")
 
-# --- NEW: Badge Decision Function ---
+# --- Badge Decision & Post Preview ---
+
 async def ask_badge_decision(client, message, uid):
     buttons = [
         [InlineKeyboardButton("✅ Add Custom Badge", callback_data="ask_badge_text"),
@@ -527,7 +497,7 @@ async def ask_badge_decision(client, message, uid):
     convo = user_conversations.get(uid)
     if convo: convo["state"] = "wait_badge_decision"
     await message.reply_text(
-        "🎨 **Poster Customization:**\n\nDo you want to add a Badge/Tag on the top of the poster?",
+        "🎨 **Poster Customization:**\n\nDo you want to add a Badge/Tag on the Top-Right of the poster?",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -538,17 +508,23 @@ async def generate_final_post_preview(client, uid, cid, msg):
     user_data = await users_collection.find_one({'_id': uid})
     caption = await generate_channel_caption(convo["details"], convo["language"], convo["links"], user_data)
     watermark = user_data.get('watermark_text')
-    badge = convo.get('temp_badge_text', None) # Get text if set in flow
+    badge = convo.get('temp_badge_text', None)
     
+    # টাইটেল এবং রেটিং বের করা (Cinematic Poster এর জন্য)
+    m_title = convo["details"].get("title") or convo["details"].get("name")
+    m_rating = f"{convo['details'].get('vote_average', 0):.1f}"
+
     poster_input = None
     if convo['details'].get('poster_bytes'):
         poster_input = convo['details']['poster_bytes']
         poster_input.seek(0)
     elif convo['details'].get('poster_path'):
-        poster_input = f"https://image.tmdb.org/t/p/w500{convo['details']['poster_path']}"
+        poster_input = f"https://image.tmdb.org/t/p/w780{convo['details']['poster_path']}" # High Res
     
-    await msg.edit_text("🖼️ Creating smart poster...")
-    poster, error = watermark_poster(poster_input, watermark, badge_text=badge)
+    await msg.edit_text("🖼️ Creating cinematic poster...")
+    
+    # 🆕 Updated Function Call
+    poster, error = watermark_poster(poster_input, watermark, badge_text=badge, movie_title=m_title, rating=m_rating)
     
     await msg.delete()
     if error: await client.send_message(cid, f"⚠️ **Error creating poster:** `{error}`")
@@ -635,7 +611,10 @@ async def search_commands(client, message: Message):
             buttons.append([InlineKeyboardButton(f"{media_icon} {title} ({year})", callback_data=f"select_post_{m_type}_{r['id']}")])
     
     buttons.append([InlineKeyboardButton("📝 Create Manually", callback_data="manual_start")])
-    await processing_msg.edit_text(f"👇 **Results for:** `{query}`", reply_markup=InlineKeyboardMarkup(buttons))
+    msg = await processing_msg.edit_text(f"👇 **Results for:** `{query}`", reply_markup=InlineKeyboardMarkup(buttons))
+    
+    # 🆕 Auto Delete Task
+    asyncio.create_task(auto_delete_message(client, message.chat.id, msg.id))
 
 @bot.on_callback_query(filters.regex("^manual_"))
 async def manual_handler(client, cb: CallbackQuery):
@@ -674,7 +653,6 @@ async def selection_cb(client, cb: CallbackQuery):
         user_conversations[uid]["state"] = "wait_movie_lang"
         await cb.message.edit_text("**Movie:** Enter Language:")
 
-# --- NEW: Badge Callbacks ---
 @bot.on_callback_query(filters.regex(r"^(ask_badge_text|skip_badge|set_badge_bangla)"))
 async def badge_callbacks(client, cb: CallbackQuery):
     data = cb.data
@@ -706,35 +684,66 @@ async def conversation_handler(client, message: Message):
     state = convo["state"]
     text = message.text.strip() if message.text else None
     
-    # --- ADMIN STATES ---
+    # --- ADMIN STATES (UPDATED BROADCAST) ---
     if state == "admin_broadcast_wait":
         if uid != OWNER_ID: return
-        msg = await message.reply_text("📣 Broadcasting...")
+        
+        do_pin = False
+        if text.startswith("/pin"):
+            do_pin = True
+            text = text.replace("/pin", "").strip()
+
+        if not text and not message.reply_to_message:
+            return await message.reply_text("❌ Please send a message or reply to one.")
+
+        status_msg = await message.reply_text("📣 **Broadcast Started...** 0%")
         users = users_collection.find({})
-        sent = 0
+        total = await users_collection.count_documents({})
+        done, blocked = 0, 0
+        
         async for user in users:
             try:
-                await message.copy(chat_id=user['_id'])
-                sent += 1
-                await asyncio.sleep(0.1)
-            except: pass
-        await msg.edit_text(f"✅ Sent to {sent} users.")
+                if message.reply_to_message:
+                    msg = await message.reply_to_message.copy(chat_id=user['_id'])
+                else:
+                    msg = await client.send_message(chat_id=user['_id'], text=text)
+                
+                if do_pin and msg:
+                    try: await msg.pin(disable_notification=False)
+                    except: pass
+                
+                done += 1
+            except FloodWait as e:
+                await asyncio.sleep(e.value)
+            except Exception:
+                blocked += 1
+            
+            if done % 20 == 0:
+                await status_msg.edit_text(f"📣 **Broadcasting...**\n✅ Sent: {done}\n🚫 Blocked: {blocked}\n📊 Total: {total}")
+
+        await status_msg.edit_text(f"✅ **Broadcast Complete!**\nSent: {done}\nBlocked: {blocked}")
+        await log_event(f"📢 Broadcast finished. Sent: {done}, Blocked: {blocked}")
         del user_conversations[uid]
         return
+
     elif state == "admin_add_prem_wait":
         if uid != OWNER_ID: return
         try:
-            await users_collection.update_one({'_id': int(text)}, {'$set': {'is_premium': True}}, upsert=True)
-            await message.reply_text(f"✅ Added Premium.")
-        except: pass
+            target_id = int(text)
+            await users_collection.update_one({'_id': target_id}, {'$set': {'is_premium': True}}, upsert=True)
+            await message.reply_text(f"✅ User `{target_id}` is now Premium.")
+            await log_event(f"💎 Premium added to {target_id}")
+        except: await message.reply_text("❌ Invalid ID.")
         del user_conversations[uid]
         return
+
     elif state == "admin_rem_prem_wait":
         if uid != OWNER_ID: return
         try:
-            await users_collection.update_one({'_id': int(text)}, {'$set': {'is_premium': False}})
-            await message.reply_text(f"✅ Removed Premium.")
-        except: pass
+            target_id = int(text)
+            await users_collection.update_one({'_id': target_id}, {'$set': {'is_premium': False}})
+            await message.reply_text(f"✅ Removed Premium from `{target_id}`.")
+        except: await message.reply_text("❌ Invalid ID.")
         del user_conversations[uid]
         return
 
@@ -778,7 +787,6 @@ async def conversation_handler(client, message: Message):
         await message.reply_text("✅ Saved. Send **1080p** link (or `skip`):")
     elif state == "wait_1080p":
         if text.lower() != 'skip': convo["links"]["1080p"] = await shorten_link(uid, text)
-        # ---> TRIGGER BADGE DECISION HERE <---
         await ask_badge_decision(client, message, uid)
 
     elif state == "wait_tv_lang":
@@ -787,7 +795,6 @@ async def conversation_handler(client, message: Message):
     elif state == "wait_season_number":
         if text.lower() == 'done':
             if not convo.get('links'): return await message.reply_text("⚠️ No seasons added.")
-            # ---> TRIGGER BADGE DECISION HERE <---
             await ask_badge_decision(client, message, uid)
             return
         
@@ -813,7 +820,6 @@ async def conversation_handler(client, message: Message):
         convo['state'] = 'wait_season_number'
         await message.reply_text(f"✅ Season {s_num} saved.\n**Enter next Season Number OR type `done`:**")
 
-    # --- NEW: Handle Custom Badge Text Input ---
     elif state == "wait_badge_text":
         convo['temp_badge_text'] = text
         msg = await message.reply_text(f"✅ Badge text set: **{text}**\nGenerating preview...")
@@ -837,6 +843,7 @@ async def post_to_channel_cb(client, cb: CallbackQuery):
         else:
             await client.send_message(int(channel_id), final_post['caption'], parse_mode=enums.ParseMode.MARKDOWN)
         await cb.message.edit_text(f"✅ **Posted to channel!**")
+        await log_event(f"📤 Post published by User {uid} to Channel {channel_id}")
     except Exception as e:
         await cb.message.edit_text(f"❌ Failed: `{e}`")
     finally:
